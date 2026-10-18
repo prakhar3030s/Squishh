@@ -1,0 +1,54 @@
+<svg width="500" height="130" viewBox="0 0 500 130" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="squishGrad" x1="0" y1="0" x2="90" y2="90" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#4A6B53"/>
+      <stop offset="100%" stop-color="#76A183"/>
+    </linearGradient>
+    <linearGradient id="innerGlow" x1="20" y1="20" x2="90" y2="90" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="softShadow" x="12" y="14" width="102" height="102" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="6" stdDeviation="6" flood-color="#4A6B53" flood-opacity="0.35"/>
+    </filter>
+    <style>
+      .brand-title {
+        font-family: -apple-system, BlinkMacSystemFont, "Plus Jakarta Sans", "Inter", "Segoe UI", Roboto, sans-serif;
+        font-weight: 800;
+        font-size: 46px;
+        letter-spacing: -1.5px;
+        fill: #EDE9E3;
+      }
+      .brand-sub {
+        font-family: -apple-system, BlinkMacSystemFont, "JetBrains Mono", "Inter", monospace;
+        font-weight: 700;
+        font-size: 11.5px;
+        letter-spacing: 2px;
+        fill: #76A183;
+      }
+      @media (prefers-color-scheme: light) {
+        .brand-title { fill: #2C302E; }
+        .brand-sub { fill: #4A6B53; }
+      }
+    </style>
+  </defs>
+
+  <!-- Squircle Icon Container with Shadow -->
+  <g filter="url(#softShadow)">
+    <rect x="20" y="20" width="86" height="86" rx="26" fill="url(#squishGrad)"/>
+    <rect x="20" y="20" width="86" height="86" rx="26" fill="url(#innerGlow)"/>
+  </g>
+
+  <!-- Squeezed / Compression Wave graphic -->
+  <path d="M43 63C48 57 58 57 63 63C68 69 78 69 83 63" stroke="#FFFFFF" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M47 71C50 67 56 67 59 71C62 75 68 75 71 71" stroke="#FFFFFF" stroke-opacity="0.6" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Sparkle Stars -->
+  <path d="M63 37C63 43 67 47 73 47C67 47 63 51 63 57C63 51 59 47 53 47C59 47 63 43 63 37Z" fill="#FFFFFF"/>
+  <circle cx="45" cy="46" r="2.5" fill="#FFFFFF" fill-opacity="0.8"/>
+  <circle cx="78" cy="77" r="2" fill="#FFFFFF" fill-opacity="0.7"/>
+
+  <!-- Brand Typography -->
+  <text x="126" y="74" class="brand-title">squishh</text>
+  <text x="128" y="95" class="brand-sub">OFFLINE MEDIA COMPRESSOR</text>
+</svg>

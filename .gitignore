@@ -1,0 +1,51 @@
+# Node / Web dependencies & bundles
+node_modules/
+dist/
+.vite/
+
+# Environment & Sensitive Keystore credentials
+.env
+.env.local
+.env.*.local
+local.properties
+keystore.properties
+*.keystore
+*.jks
+
+# Android & Gradle artifacts
+.gradle/
+build/
+bin/
+gen/
+out/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.ap_
+*.aab
+*.aar
+*.dex
+*.class
+
+# IDE and System files
+.idea/
+*.iml
+.vscode/
+.navigation/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Antigravity / AI agent scratch
+.agents/
+.gemini/
+project.md
