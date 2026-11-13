@@ -274,7 +274,7 @@ class PdfProcessor(
  * Pure byte-level PDF 1.4 generator that embeds JPEG images directly via /Filter /DCTDecode.
  * This completely avoids Skia's uncompressed ARGB Deflate bloat and makes compressed PDFs 80-95% lighter.
  */
-private class JpegPdfWriter(private val outputFile: File) {
+internal class JpegPdfWriter(val outputFile: File) {
     data class PageInfo(
         val jpegBytes: ByteArray,
         val pixelWidth: Int,

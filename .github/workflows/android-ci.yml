@@ -34,11 +34,18 @@ jobs:
       - name: Build web bundle
         run: npm run build
 
+      - name: Run Web unit tests
+        run: npm test
+
       - name: Sync Capacitor Android assets
         run: npx cap sync android
 
       - name: Grant execute permission for Gradle wrapper
         run: chmod +x android/gradlew
+
+      - name: Run Android unit tests
+        working-directory: android
+        run: ./gradlew testDebugUnitTest --no-daemon
 
       - name: Build Debug APK
         working-directory: android

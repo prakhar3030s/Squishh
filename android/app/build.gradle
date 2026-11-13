@@ -1,5 +1,6 @@
 apply plugin: 'com.android.application'
 apply plugin: 'org.jetbrains.kotlin.android'
+apply plugin: 'jacoco'
 
 android {
     namespace = "com.prakhar.squishh"
@@ -63,7 +64,18 @@ android {
         }
     }
 
+    testOptions {
+        unitTests {
+            includeAndroidResources = true
+            returnDefaultValues = true
+        }
+    }
+
     buildTypes {
+        debug {
+            testCoverageEnabled true
+            enableUnitTestCoverage true
+        }
         release {
             minifyEnabled true
             shrinkResources true
@@ -91,6 +103,12 @@ dependencies {
     implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
     implementation project(':capacitor-android')
     testImplementation "junit:junit:$junitVersion"
+    testImplementation "org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0"
+    testImplementation "androidx.arch.core:core-testing:2.2.0"
+    testImplementation "io.mockk:mockk:1.13.13"
+    testImplementation "org.robolectric:robolectric:4.14.1"
+    testImplementation "io.insert-koin:koin-test:4.0.2"
+    testImplementation "io.insert-koin:koin-test-junit4:4.0.2"
     androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
     implementation project(':capacitor-cordova-android-plugins')
 
@@ -105,6 +123,34 @@ dependencies {
     implementation "androidx.media3:media3-transformer:$media3Version"
     implementation "androidx.media3:media3-effect:$media3Version"
     implementation "androidx.media3:media3-common:$media3Version"
+}
+
+tasks.register("jacocoTestReport", JacocoReport) {
+    dependsOn "testDebugUnitTest"
+    reports {
+        xml.required = true
+        html.required = true
+        csv.required = false
+    }
+
+    def fileFilter = [
+        '**/R.class',
+        '**/R$*.class',
+        '**/BuildConfig.*',
+        '**/Manifest*.*',
+        '**/*Test*.*',
+        'android/**/*.*'
+    ]
+
+    def kotlinDebugTree = fileTree(dir: "${project.layout.buildDirectory.asFile.get()}/tmp/kotlin-classes/debug", excludes: fileFilter)
+    def javaDebugTree = fileTree(dir: "${project.layout.buildDirectory.asFile.get()}/intermediates/javac/debug/classes", excludes: fileFilter)
+
+    sourceDirectories.setFrom(files(["${project.projectDir}/src/main/java"]))
+    classDirectories.setFrom(files([kotlinDebugTree, javaDebugTree]))
+    executionData.setFrom(fileTree(dir: project.layout.buildDirectory.asFile.get(), includes: [
+        'outputs/unit_test_code_coverage/debugUnitTest/testDebugUnitTest.exec',
+        'jacoco/testDebugUnitTest.exec'
+    ]))
 }
 
 apply from: 'capacitor.build.gradle'

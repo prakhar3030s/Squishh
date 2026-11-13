@@ -10,6 +10,8 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Android_14_--_15-3DDC84?style=flat&logo=android&logoColor=white" alt="Platform">
   <img src="https://img.shields.io/badge/Privacy-100%25_Offline-blue?style=flat&logo=shield" alt="Privacy">
+  <img src="https://img.shields.io/badge/Tests-54%20Passing-brightgreen?style=flat&logo=vitest" alt="Tests">
+  <img src="https://img.shields.io/badge/CI-GitHub_Actions-2088FF?style=flat&logo=github-actions&logoColor=white" alt="CI">
   <img src="https://img.shields.io/badge/Engine-Jetpack_Media3-FF6F00?style=flat" alt="Media3">
   <img src="https://img.shields.io/badge/License-MIT-green?style=flat" alt="License">
 </p>
@@ -72,6 +74,7 @@ Most media compression tools upload your personal photos, videos, and private do
 | **Native DI & Architecture** | Koin 4.0.2 DI, `FileRepository`, split bridge controllers (`JobCancellationManager`, `ForegroundProgressController`, `ShareHandler`), typed `@BridgeContract` models |
 | **Native Video Engine** | AndroidX Jetpack Media3 (`media3-transformer`, `media3-effect`, `MediaCodec`) & streaming LZW GIF encoder |
 | **Native Graphics Engine** | Android `BitmapFactory`, `ImageDecoder`, `android.graphics.pdf` |
+| **Testing & CI** | Vitest 5, React Testing Library, JSDOM, JUnit 4, Robolectric, MockK, CoroutinesTest, Koin Test, JaCoCo, GitHub Actions |
 | **Icons & Fonts** | Lucide React, Plus Jakarta Sans, Inter, JetBrains Mono |
 
 ---
@@ -80,31 +83,45 @@ Most media compression tools upload your personal photos, videos, and private do
 
 ```
 squishh/
+├── .github/workflows/
+│   └── android-ci.yml                   # Automated CI: npm test, cap sync, gradlew testDebugUnitTest & assembleDebug
 ├── android/                             # Native Android Platform
 │   ├── app/
-│   │   ├── build.gradle                 # Media3, Koin DI, Coroutines, 16 KB page-size config
+│   │   ├── build.gradle                 # Media3, Koin DI, Coroutines, JaCoCo, 16 KB page-size config
 │   │   ├── proguard-rules.pro           # R8 keep rules for Capacitor bridge & Koin graph
-│   │   └── src/main/
-│   │       ├── AndroidManifest.xml      # Zero internet, SquishhApplication, Foreground Service, Share filters
-│   │       └── java/com/prakhar/squishh/
-│   │           ├── SquishhApplication.kt        # Koin DI bootstrap (`startKoin`)
-│   │           ├── AppModule.kt                 # Koin singleton module graph
-│   │           ├── BridgeModels.kt              # @BridgeContract data classes & JSObject mappers
-│   │           ├── FileRepository.kt            # Centralized storage, export & cache abstraction
-│   │           ├── MainActivity.kt              # Native WebView file chooser, share intent & runtime permissions
-│   │           ├── SquishhEnginePlugin.kt       # Two-way Capacitor native bridge dispatch
-│   │           ├── JobCancellationManager.kt    # Thread-safe single & batch job cancellation registry
-│   │           ├── ForegroundProgressController.kt # Processing notification service controller
-│   │           ├── ShareHandler.kt              # Off-main-thread FileProvider share chooser launcher
-│   │           ├── ImageProcessor.kt            # Binary-search target size compression & bitmap downsampling
-│   │           ├── VideoProcessor.kt            # Media3 Transformer & streaming animated GIF encoder
-│   │           ├── AudioProcessor.kt            # M4A (AAC) transcoding & video soundtrack extractor
-│   │           ├── PdfProcessor.kt              # Native PDF renderer & JpegPdfWriter pipeline
-│   │           ├── CacheCleaner.kt              # Async cache purging engine
-│   │           ├── SquishhCleanupService.kt     # Task-kill cache cleanup service
-│   │           ├── StorageResolver.kt           # Scoped Storage content URI resolver
-│   │           ├── MediaExporter.kt             # MediaStore public gallery exporter
-│   │           └── SquishhProcessingService.kt  # Foreground notification progress updater
+│   │   └── src/
+│   │       ├── main/
+│   │       │   ├── AndroidManifest.xml  # Zero internet, SquishhApplication, Foreground Service, Share filters
+│   │       │   └── java/com/prakhar/squishh/
+│   │       │       ├── SquishhApplication.kt        # Koin DI bootstrap (`startKoin`)
+│   │       │       ├── AppModule.kt                 # Koin singleton module graph
+│   │       │       ├── BridgeModels.kt              # @BridgeContract data classes & JSObject mappers
+│   │       │       ├── FileRepository.kt            # Centralized storage, export & cache abstraction
+│   │       │       ├── MainActivity.kt              # Native WebView file chooser, share intent & runtime permissions
+│   │       │       ├── SquishhEnginePlugin.kt       # Two-way Capacitor native bridge dispatch
+│   │       │       ├── JobCancellationManager.kt    # Thread-safe single & batch job cancellation registry
+│   │       │       ├── ForegroundProgressController.kt # Processing notification service controller
+│   │       │       ├── ShareHandler.kt              # Off-main-thread FileProvider share chooser launcher
+│   │       │       ├── ImageProcessor.kt            # Binary-search target size compression & bitmap downsampling
+│   │       │       ├── VideoProcessor.kt            # Media3 Transformer & streaming animated GIF encoder
+│   │       │       ├── AudioProcessor.kt            # M4A (AAC) transcoding & video soundtrack extractor
+│   │       │       ├── PdfProcessor.kt              # Native PDF renderer & JpegPdfWriter pipeline
+│   │       │       ├── CacheCleaner.kt              # Async cache purging engine
+│   │       │       ├── SquishhCleanupService.kt     # Task-kill cache cleanup service
+│   │       │       ├── StorageResolver.kt           # Scoped Storage content URI resolver
+│   │       │       ├── MediaExporter.kt             # MediaStore public gallery exporter
+│   │       │       └── SquishhProcessingService.kt  # Foreground notification progress updater
+│   │       └── test/
+│   │           ├── resources/robolectric.properties # Robolectric Android SDK 34 config
+│   │           └── java/com/prakhar/squishh/
+│   │               ├── ImageProcessorTest.kt        # Anti-ballooning ratio & format bounds
+│   │               ├── VideoProcessorTest.kt        # Compression level bitrate monotonicity & floors
+│   │               ├── AudioProcessorTest.kt        # Bitrate clamping & mono downmix coefficients
+│   │               ├── PdfProcessorTest.kt          # PDF 1.4 spec, xref table & PdfRenderer compatibility
+│   │               ├── GifEncoderTest.kt            # 9-bit LZW sub-block chunking & 254-px clear codes
+│   │               ├── StorageResolverAndMediaExporterTest.kt # MIME lookup & MediaStore routing
+│   │               ├── CacheCleanerTest.kt          # Directory size & async cache clearing
+│   │               └── SquishhEngineTest.kt         # Lifecycle cancel & Koin DI graph validation
 │   └── build.gradle
 ├── src/                                 # Web Application Layer (React 19)
 │   ├── components/
@@ -125,11 +142,18 @@ squishh/
 │   │   ├── ServiceContext.tsx           # React Context DI (`SquishhServicesProvider`)
 │   │   ├── engineManager.ts             # Central engine orchestrator & error humanizer
 │   │   └── haptics.ts                   # Tactile haptic feedback triggers
+│   ├── test/                            # Web Unit & Integration Tests (Vitest)
+│   │   ├── setup.ts                     # JSDOM polyfills, Web Audio & matchMedia mocks
+│   │   ├── engineManager.test.ts        # Format helpers, error dictionary & listener registry
+│   │   ├── batchQueueProgress.test.ts   # Overall progress math & cancelled/failed exclusion
+│   │   ├── workflowComponents.test.tsx  # React Testing Library component tests across 4 workflows
+│   │   └── e2e.test.tsx                 # App integration E2E: share intake -> compress -> save
 │   ├── lib/gsap.ts                      # GSAP & Flip plugin registration
 │   ├── App.tsx                          # Adaptive app shell, mode tabs & incoming share intake
 │   ├── main.tsx                         # React entrypoint with ServiceProvider
 │   └── index.css                        # Tailwind v4, design tokens & safe area insets
 ├── capacitor.config.ts                  # Capacitor 4-plugin configuration & dark splash/status bar theme
+├── vitest.config.ts                     # Vitest test runner configuration
 └── package.json
 ```
 
@@ -174,6 +198,68 @@ Copy `android/keystore.properties.example` to `android/keystore.properties` (git
 ```bash
 cd android
 ./gradlew assembleRelease
+```
+
+---
+
+## 🧪 Testing & Quality Assurance
+
+Squishh includes an automated test suite spanning both the web and native Android layers (54 tests total, 0 failures):
+
+### 1. Web Unit, Component & E2E Tests (Vitest + RTL + JSDOM)
+```bash
+# Run all web tests
+npm test
+
+# Run tests in watch mode
+npx vitest
+
+# Run with UI
+npx vitest --ui
+```
+* **EngineManager & Bridge Tests**: Validates format helpers (`formatBytes`, `formatEta`), bridge error translation dictionary (`humanizeError`), and listener registration.
+* **Batch Queue Progress Math**: Asserts progress averaging across items, clamping, and exclusion of aborted/failed items from denominator (`batchQueueProgress.test.ts`).
+* **Workflow Component Tests**: Validates stage progression, sub-mode switching, format toggling, haptic triggers, and error banners across all 4 workflows via React Testing Library (`workflowComponents.test.tsx`).
+* **Narrow E2E Integration**: Simulates incoming Android share intake, automatic file resolution, compression pipeline, and gallery export (`e2e.test.tsx`).
+
+### 2. Native Android Unit Tests (JUnit 4 + MockK + Robolectric)
+```bash
+cd android
+
+# Run all Android unit tests
+./gradlew testDebugUnitTest
+
+# Generate JaCoCo code coverage report
+./gradlew jacocoTestReport
+```
+HTML coverage reports will be available at `android/app/build/reports/jacoco/jacocoTestReport/html/index.html`.
+
+* **ImageProcessorTest**: Verifies anti-ballooning ratio caps, sub-1024 bytes clamping boundary, format resolutions, and coroutine cancellation token propagation.
+* **VideoProcessorTest**: Asserts strict bitrate monotonicity across compression levels, estimated size ratio bounds, minimum bitrate floors, and audio-mute bitrate reallocations.
+* **AudioProcessorTest**: Verifies bitrate bounds clamping ([32..320 kbps]), mono downmixing coefficient matrix (`1f / channels`), and default M4A format assertion.
+* **PdfProcessorTest**: Verifies PDF 1.4 binary spec conformance, `%PDF-1.4` magic header, xref offset table, trailer catalog structure, and Robolectric `PdfRenderer` compatibility.
+* **GifEncoderTest**: Tests GIF89a header, screen descriptor, GCT palette, NETSCAPE2.0 looping extension, and 9-bit LZW sub-block chunking with periodic 254-pixel Clear codes.
+* **StorageResolverAndMediaExporterTest**: Validates MIME type detection tables, MediaStore export path routing, and missing file exception handling.
+* **CacheCleanerTest**: Tests recursive cache size calculation and asynchronous deletion with task synchronization.
+* **SquishhEngineTest**: Verifies single and batch job cancellation registries and Koin dependency injection graph completeness.
+
+### 3. Continuous Integration (GitHub Actions)
+Every push and pull request to `main` automatically triggers [.github/workflows/android-ci.yml](file:///d:/squishh/.github/workflows/android-ci.yml):
+1. Installs Node.js & dependencies (`npm ci`).
+2. Builds web assets (`npm run build`).
+3. Runs web unit and integration tests (`npm test`).
+4. Syncs Capacitor Android assets (`npx cap sync android`).
+5. Executes Android unit tests (`./gradlew testDebugUnitTest`).
+6. Builds the Debug APK artifact (`./gradlew assembleDebug`).
+
+---
+
+## 📋 Pre-Push Verification One-Liner
+
+Before committing and pushing changes to GitHub, you can run this command chain to verify that everything compiles, passes all 54 tests, and produces a valid APK:
+
+```bash
+npm run build && npm test && npx cap sync android && cd android && ./gradlew testDebugUnitTest assembleDebug
 ```
 
 ---

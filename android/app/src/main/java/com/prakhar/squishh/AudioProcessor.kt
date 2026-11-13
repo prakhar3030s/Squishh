@@ -30,6 +30,20 @@ class AudioProcessor(
     private val fileRepository: FileRepository
 ) {
 
+    companion object {
+        const val MIN_AUDIO_BITRATE_KBPS = 32
+        const val MAX_AUDIO_BITRATE_KBPS = 320
+        const val DEFAULT_OUTPUT_FORMAT = "m4a"
+
+        fun clampBitrate(bitrateKbps: Int): Int =
+            bitrateKbps.coerceIn(MIN_AUDIO_BITRATE_KBPS, MAX_AUDIO_BITRATE_KBPS)
+
+        fun computeChannelMixingCoefficients(channelCount: Int): FloatArray {
+            val count = channelCount.coerceAtLeast(1)
+            return FloatArray(count) { 1f / count }
+        }
+    }
+
     suspend fun process(
         inputPath: String,
         targetFormat: String = "m4a", // "m4a", "aac" (MP3/WAV are not encodable by Media3)
@@ -73,8 +87,8 @@ class AudioProcessor(
         }
 
         // Media3 only encodes AAC into an MP4/M4A container.
-        val ext = "m4a"
-        val safeBitrateKbps = bitrateKbps.coerceIn(32, 320)
+        val ext = DEFAULT_OUTPUT_FORMAT
+        val safeBitrateKbps = clampBitrate(bitrateKbps)
         val outputFile = fileRepository.allocateOutputFile("squishh_audio", ext)
 
         // 2. Hardware Transcoding / Extraction via Media3 Transformer
@@ -90,7 +104,7 @@ class AudioProcessor(
                 supportedCounts.add(channelCount)
             }
             for (inChannels in supportedCounts) {
-                val coefficients = FloatArray(inChannels) { 1f / inChannels }
+                val coefficients = computeChannelMixingCoefficients(inChannels)
                 mixing.putChannelMixingMatrix(ChannelMixingMatrix(inChannels, 1, coefficients))
             }
             audioProcessors.add(mixing)

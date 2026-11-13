@@ -94,7 +94,7 @@ object MediaExporter {
         return@withContext itemUri.toString()
     }
 
-    private fun getMimeType(fileName: String, fallback: String): String {
+    internal fun getMimeType(fileName: String, fallback: String): String {
         return when (fileName.substringAfterLast('.', "").lowercase()) {
             "jpg", "jpeg" -> "image/jpeg"
             "png" -> "image/png"

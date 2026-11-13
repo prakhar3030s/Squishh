@@ -81,6 +81,70 @@ class VideoProcessor(
             "high" -> HIGH_SIZE_RATIO
             else -> DEFAULT_ESTIMATE_SIZE_RATIO
         }
+
+        fun calculateTargetVideoBitrate(
+            originalSizeBytes: Long,
+            durationMs: Long,
+            origHeight: Int,
+            compressionLevel: String,
+            resolution: String = "original",
+            fpsLimit: Int = 0,
+            muteAudio: Boolean = false
+        ): Int {
+            val durationSec = (durationMs / 1000f).coerceAtLeast(1.0f)
+            val origBitrate = ((originalSizeBytes * 8L) / durationSec).toInt()
+                .coerceIn(MIN_SOURCE_BITRATE_BPS, MAX_SOURCE_BITRATE_BPS)
+
+            val effectiveTargetBytes = when {
+                compressionLevel == "light" -> (originalSizeBytes * LIGHT_SIZE_RATIO).toLong()
+                compressionLevel == "balanced" -> (originalSizeBytes * BALANCED_SIZE_RATIO).toLong()
+                compressionLevel == "high" -> (originalSizeBytes * HIGH_SIZE_RATIO).toLong()
+                else -> 0L
+            }
+
+            return when {
+                compressionLevel == "light" -> {
+                    val audioBitrate = if (muteAudio) 0 else LIGHT_AUDIO_BITRATE_BPS
+                    val targetTotalBitrate = ((effectiveTargetBytes * LIGHT_OVERHEAD_FACTOR * 8L) / durationSec).toInt()
+                    (targetTotalBitrate - audioBitrate).coerceIn(
+                        MIN_LIGHT_VIDEO_BITRATE_BPS,
+                        (origBitrate * LIGHT_SIZE_RATIO).toInt().coerceAtLeast(MIN_LIGHT_VIDEO_BITRATE_BPS)
+                    )
+                }
+                compressionLevel == "balanced" -> {
+                    val audioBitrate = if (muteAudio) 0 else BALANCED_AUDIO_BITRATE_BPS
+                    val targetTotalBitrate = ((effectiveTargetBytes * BALANCED_OVERHEAD_FACTOR * 8L) / durationSec).toInt()
+                    (targetTotalBitrate - audioBitrate).coerceIn(
+                        MIN_BALANCED_VIDEO_BITRATE_BPS,
+                        (origBitrate * BALANCED_SIZE_RATIO).toInt().coerceAtLeast(MIN_BALANCED_VIDEO_BITRATE_BPS)
+                    )
+                }
+                compressionLevel == "high" -> {
+                    val audioBitrate = if (muteAudio) 0 else HIGH_AUDIO_BITRATE_BPS
+                    val targetTotalBitrate = ((effectiveTargetBytes * HIGH_OVERHEAD_FACTOR * 8L) / durationSec).toInt()
+                    (targetTotalBitrate - audioBitrate).coerceIn(
+                        MIN_HIGH_VIDEO_BITRATE_BPS,
+                        (origBitrate * HIGH_CAP_BITRATE_RATIO).toInt().coerceAtLeast(MIN_HIGH_VIDEO_BITRATE_BPS)
+                    )
+                }
+                else -> {
+                    val targetNominalHeight = when (resolution) {
+                        "360p" -> 360
+                        "480p" -> 480
+                        "720p" -> 720
+                        "1080p" -> 1080
+                        else -> origHeight
+                    }
+                    val effectiveH = minOf(origHeight, targetNominalHeight)
+                    val tier = RESOLUTION_BITRATE_SCALES.first { effectiveH <= it.maxHeight }
+                    val nominalBitrate = if (fpsLimit >= HIGH_FPS_THRESHOLD) tier.highFpsBps else tier.standardFpsBps
+                    minOf(
+                        nominalBitrate,
+                        (origBitrate * RESOLUTION_ORIG_BITRATE_CAP_RATIO).toInt().coerceAtLeast(MIN_BALANCED_VIDEO_BITRATE_BPS)
+                    )
+                }
+            }
+        }
     }
 
     suspend fun process(
@@ -150,48 +214,15 @@ class VideoProcessor(
         }
 
         // Calculate target video bitrate
-        val videoBitrate = when {
-            compressionLevel == "light" -> {
-                val audioBitrate = if (muteAudio) 0 else LIGHT_AUDIO_BITRATE_BPS
-                val targetTotalBitrate = ((effectiveTargetBytes * LIGHT_OVERHEAD_FACTOR * 8L) / durationSec).toInt()
-                (targetTotalBitrate - audioBitrate).coerceIn(
-                    MIN_LIGHT_VIDEO_BITRATE_BPS,
-                    (origBitrate * LIGHT_SIZE_RATIO).toInt().coerceAtLeast(MIN_LIGHT_VIDEO_BITRATE_BPS)
-                )
-            }
-            compressionLevel == "balanced" -> {
-                val audioBitrate = if (muteAudio) 0 else BALANCED_AUDIO_BITRATE_BPS
-                val targetTotalBitrate = ((effectiveTargetBytes * BALANCED_OVERHEAD_FACTOR * 8L) / durationSec).toInt()
-                (targetTotalBitrate - audioBitrate).coerceIn(
-                    MIN_BALANCED_VIDEO_BITRATE_BPS,
-                    (origBitrate * BALANCED_SIZE_RATIO).toInt().coerceAtLeast(MIN_BALANCED_VIDEO_BITRATE_BPS)
-                )
-            }
-            compressionLevel == "high" -> {
-                val audioBitrate = if (muteAudio) 0 else HIGH_AUDIO_BITRATE_BPS
-                val targetTotalBitrate = ((effectiveTargetBytes * HIGH_OVERHEAD_FACTOR * 8L) / durationSec).toInt()
-                (targetTotalBitrate - audioBitrate).coerceIn(
-                    MIN_HIGH_VIDEO_BITRATE_BPS,
-                    (origBitrate * HIGH_CAP_BITRATE_RATIO).toInt().coerceAtLeast(MIN_HIGH_VIDEO_BITRATE_BPS)
-                )
-            }
-            else -> {
-                val targetNominalHeight = when (resolution) {
-                    "360p" -> 360
-                    "480p" -> 480
-                    "720p" -> 720
-                    "1080p" -> 1080
-                    else -> origHeight
-                }
-                val effectiveH = minOf(origHeight, targetNominalHeight)
-                val tier = RESOLUTION_BITRATE_SCALES.first { effectiveH <= it.maxHeight }
-                val nominalBitrate = if (fpsLimit >= HIGH_FPS_THRESHOLD) tier.highFpsBps else tier.standardFpsBps
-                minOf(
-                    nominalBitrate,
-                    (origBitrate * RESOLUTION_ORIG_BITRATE_CAP_RATIO).toInt().coerceAtLeast(MIN_BALANCED_VIDEO_BITRATE_BPS)
-                )
-            }
-        }
+        val videoBitrate = calculateTargetVideoBitrate(
+            originalSizeBytes = originalSizeBytes,
+            durationMs = durationMs,
+            origHeight = origHeight,
+            compressionLevel = compressionLevel,
+            resolution = resolution,
+            fpsLimit = fpsLimit,
+            muteAudio = muteAudio
+        )
 
         android.util.Log.i("VideoProcessor", "Starting transcode: level=$compressionLevel, duration=${durationSec}s, origBitrate=$origBitrate, effectiveTargetBytes=$effectiveTargetBytes, videoBitrate=$videoBitrate")
 
@@ -428,7 +459,7 @@ class VideoProcessor(
         }
     }
 
-    private fun writeGifHeaderAndPalette(out: OutputStream, width: Int, height: Int) {
+    internal fun writeGifHeaderAndPalette(out: OutputStream, width: Int, height: Int) {
         // Header
         out.write("GIF89a".toByteArray())
 
@@ -508,7 +539,7 @@ class VideoProcessor(
         writeUncompressedLzw(indexedPixels, out)
     }
 
-    private fun writeUncompressedLzw(pixels: ByteArray, out: OutputStream) {
+    internal fun writeUncompressedLzw(pixels: ByteArray, out: OutputStream) {
         val minCodeSize = 8
         out.write(minCodeSize)
         val clearCode = 1 shl minCodeSize

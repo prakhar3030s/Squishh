@@ -15,10 +15,18 @@ class ImageProcessor(
 
     companion object {
         private const val DEFAULT_MAX_DECODE_DIMENSION = 4096
-        private const val ANTI_BALLOON_CAP_RATIO = 0.95
-        private const val DEFAULT_MIN_QUALITY = 5
-        private const val DEFAULT_MAX_QUALITY = 100
-        private const val DEFAULT_TARGET_QUALITY = 80
+        const val ANTI_BALLOON_CAP_RATIO = 0.95
+        const val DEFAULT_MIN_QUALITY = 5
+        const val DEFAULT_MAX_QUALITY = 100
+        const val DEFAULT_TARGET_QUALITY = 80
+
+        fun computeMaxAllowedCap(originalSizeBytes: Long): Long {
+            return if (originalSizeBytes > 1L) {
+                (originalSizeBytes * ANTI_BALLOON_CAP_RATIO).toLong().coerceAtLeast(1L).coerceAtMost(originalSizeBytes - 1L)
+            } else {
+                1L
+            }
+        }
     }
 
     fun process(
@@ -70,11 +78,7 @@ class ImageProcessor(
 
         // 4. Compression (Target Size Binary Search OR Fixed Quality with Anti-Ballooning Guard)
         // Rule: A file compressor must NEVER expand a file beyond its original size.
-        val maxAllowedCap = if (originalSizeBytes > 1L) {
-            (originalSizeBytes * ANTI_BALLOON_CAP_RATIO).toLong().coerceAtLeast(1L).coerceAtMost(originalSizeBytes - 1L)
-        } else {
-            1L
-        }
+        val maxAllowedCap = computeMaxAllowedCap(originalSizeBytes)
 
         if (targetSizeBytes > 0L) {
             // Compress to target size, capped so it never expands smaller files
@@ -273,7 +277,7 @@ class ImageProcessor(
         }
     }
 
-    private fun resolveCompressFormat(format: String): Bitmap.CompressFormat {
+    internal fun resolveCompressFormat(format: String): Bitmap.CompressFormat {
         return when (format.lowercase()) {
             "png" -> Bitmap.CompressFormat.PNG
             "webp" -> {
@@ -299,7 +303,7 @@ class ImageProcessor(
         }
     }
 
-    private fun isAvifSupported(): Boolean {
+    internal fun isAvifSupported(): Boolean {
         return Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
     }
 }

@@ -1,10 +1,32 @@
 package com.prakhar.squishh
 
+import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
+import org.koin.core.context.startKoin
+import org.koin.core.context.stopKoin
+import org.koin.test.KoinTest
+import org.koin.test.get
 
-class SquishhEngineTest {
+class SquishhEngineTest : KoinTest {
+
+    @Before
+    fun setUp() {
+        startKoin {
+            modules(createTestAppModule())
+        }
+    }
+
+    @After
+    fun tearDown() {
+        stopKoin()
+    }
+
+    // --- Original 4 assertions (preserved per TEST-012 instructions) ---
 
     @Test
     fun testImageFormatResolution() {
@@ -49,5 +71,58 @@ class SquishhEngineTest {
             assertTrue(target > 0L)
             assertTrue(target <= 2 * 1024 * 1024L)
         }
+    }
+
+    // --- Meaningful Extended Engine & Architecture Tests (TEST-012) ---
+
+    @Test
+    fun testJobCancellationManagerSingleJobLifecycle() {
+        val manager = get<JobCancellationManager>()
+        val jobId = "job_single_123"
+
+        val token = manager.registerJob(jobId)
+        assertNotNull(token)
+        assertFalse("Token must start uncancelled", token.get())
+
+        manager.cancel(jobId)
+        assertTrue("Token must be cancelled after cancel", token.get())
+
+        manager.unregisterJob(jobId)
+        // Cancelling unmapped job does not crash
+        manager.cancel(jobId)
+    }
+
+    @Test
+    fun testJobCancellationManagerBatchLifecycle() {
+        val manager = get<JobCancellationManager>()
+        val batchId = "batch_456"
+        val childIds = listOf("child_1", "child_2", "child_3")
+
+        val batchToken = manager.registerBatch(batchId, childIds)
+        assertFalse("Batch token starts uncancelled", batchToken.get())
+
+        // Cancelling a child job cancels that child
+        manager.cancel("child_2")
+        assertTrue(manager.tokenFor("child_2")?.get() == true)
+
+        // Cancelling the batch cancels the batch and all children
+        manager.cancel(batchId)
+        assertTrue("Batch token must be cancelled", batchToken.get())
+        assertTrue("Child 1 must be cancelled by batch cancel", manager.tokenFor("child_1")?.get() == true)
+        assertTrue("Child 3 must be cancelled by batch cancel", manager.tokenFor("child_3")?.get() == true)
+
+        manager.unregisterBatch(batchId, childIds)
+    }
+
+    @Test
+    fun testKoinDependencyInjectionGraphResolvesAllCollaborators() {
+        assertNotNull(get<FileRepository>())
+        assertNotNull(get<JobCancellationManager>())
+        assertNotNull(get<ForegroundProgressController>())
+        assertNotNull(get<ShareHandler>())
+        assertNotNull(get<ImageProcessor>())
+        assertNotNull(get<VideoProcessor>())
+        assertNotNull(get<AudioProcessor>())
+        assertNotNull(get<PdfProcessor>())
     }
 }
