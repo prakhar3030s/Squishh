@@ -63,22 +63,51 @@ export function humanizeError(rawError: unknown, fallback: string = "that file's
 class EngineManager {
   private progressListeners = new Map<string, (progress: JobProgress) => void>();
   private listenerHandle: { remove: () => Promise<void> } | null = null;
+  private webChooserListenerHandle: { remove: () => Promise<void> } | null = null;
+  private pendingWebChooserHandler: ((files: WorkflowFile[]) => void) | null = null;
+  private initPromise: Promise<void> | null = null;
 
   async init(): Promise<void> {
-    if (this.listenerHandle) return;
-    try {
-      this.listenerHandle = await SquishhEngine.addListener('jobProgress', (data: JobProgress) => {
-        const callback = this.progressListeners.get(data.jobId);
-        if (callback) {
-          callback(data);
-        }
-      });
-    } catch {
-      // Graceful fallback on web
-    }
+    if (this.listenerHandle && this.webChooserListenerHandle) return;
+    if (this.initPromise) return this.initPromise;
+    this.initPromise = (async () => {
+      try {
+        this.listenerHandle = await SquishhEngine.addListener('jobProgress', (data: JobProgress) => {
+          const callback = this.progressListeners.get(data.jobId);
+          if (callback) {
+            callback(data);
+          }
+        });
+        this.webChooserListenerHandle = await SquishhEngine.addListener(
+          'webFilesPicked',
+          (data: { files: FileInfo[]; count: number }) => {
+            const handler = this.pendingWebChooserHandler;
+            this.pendingWebChooserHandler = null;
+            if (!handler || !data?.files || data.files.length === 0) return;
+            const mapped: WorkflowFile[] = data.files.map((f) => ({
+              name: f.displayName,
+              sizeBytes: f.sizeBytes,
+              uri: f.localPath,
+              previewUrl: Capacitor.convertFileSrc(f.localPath),
+            }));
+            handler(mapped);
+          }
+        );
+      } catch {
+        // Graceful fallback on web
+      }
+    })();
+    return this.initPromise;
+  }
+
+  setPendingWebChooserHandler(handler: ((files: WorkflowFile[]) => void) | null): void {
+    this.init().catch(() => {});
+    this.pendingWebChooserHandler = handler;
   }
 
   onProgress(jobId: string, callback: (progress: JobProgress) => void): () => void {
+    // Lazily ensure listener is established
+    this.init().catch(() => {});
     this.progressListeners.set(jobId, callback);
     return () => {
       this.progressListeners.delete(jobId);
@@ -89,71 +118,60 @@ class EngineManager {
     return await SquishhEngine.resolveFile({ uri });
   }
 
-  async pickFiles(type: string = '*/*', multiple: boolean = false): Promise<WorkflowFile[]> {
-    if (Capacitor.isNativePlatform()) {
-      try {
-        const res = await SquishhEngine.pickFiles({ type, multiple });
-        if (res && res.files && res.files.length > 0) {
-          return res.files.map((f) => ({
-            name: f.displayName,
-            sizeBytes: f.sizeBytes,
-            uri: f.localPath,
-            previewUrl: Capacitor.convertFileSrc(f.localPath),
-          }));
-        }
-      } catch (err) {
-        console.warn('Native file picker failed, will fallback to web file picker:', err);
-      }
+  /**
+   * Launches the native Android picker on native platforms.
+   * Returns:
+   * - non-empty array when files were picked
+   * - empty array (`[]`) when the user cancelled the native picker
+   * - `null` when running on web or native picker failed (caller should open web file input)
+   */
+  async pickFiles(type: string = '*/*', multiple: boolean = false): Promise<WorkflowFile[] | null> {
+    if (!Capacitor.isNativePlatform()) {
+      return null;
     }
-    return [];
+    try {
+      const res = await SquishhEngine.pickFiles({ type, multiple });
+      if (res && res.files && res.files.length > 0) {
+        return res.files.map((f) => ({
+          name: f.displayName,
+          sizeBytes: f.sizeBytes,
+          uri: f.localPath,
+          previewUrl: Capacitor.convertFileSrc(f.localPath),
+        }));
+      }
+      return [];
+    } catch (err) {
+      console.warn('Native file picker failed, will fallback to web file picker:', err);
+      return null;
+    }
   }
 
   async cacheWebFile(file: File): Promise<WorkflowFile> {
+    if (Capacitor.isNativePlatform()) {
+      throw new Error('Native platform must resolve files through StorageResolver without JS base64 transfer');
+    }
     const previewUrl = URL.createObjectURL(file);
-    if (!Capacitor.isNativePlatform()) {
-      return {
-        name: file.name,
-        sizeBytes: file.size,
-        uri: previewUrl,
-        previewUrl,
-      };
-    }
-
-    try {
-      const base64Data = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          resolve(reader.result as string);
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-
-      const cached = await SquishhEngine.writeBase64ToCache({
-        fileName: file.name,
-        base64Data,
-        mimeType: file.type || 'application/octet-stream',
-      });
-
-      return {
-        name: file.name,
-        sizeBytes: file.size,
-        uri: cached.localPath,
-        previewUrl: Capacitor.convertFileSrc(cached.localPath),
-      };
-    } catch (err) {
-      console.error('Failed to cache web file to disk:', err);
-      return {
-        name: file.name,
-        sizeBytes: file.size,
-        uri: previewUrl,
-        previewUrl,
-      };
-    }
+    return {
+      name: file.name,
+      sizeBytes: file.size,
+      uri: previewUrl,
+      previewUrl,
+    };
   }
 
   async getIncomingShare(): Promise<{ uris: string[]; mimeType: string; count: number }> {
     return await SquishhEngine.getIncomingShare();
+  }
+
+  async onIncomingShareReady(callback: () => void): Promise<() => void> {
+    try {
+      const handle = await SquishhEngine.addListener('incomingShareReady', callback);
+      return () => {
+        handle.remove().catch(() => {});
+      };
+    } catch {
+      return () => {};
+    }
   }
 
   async compressImage(
@@ -232,31 +250,36 @@ class EngineManager {
 
   async imagesToPdf(
     imagePaths: string[],
-    onProgress?: (p: JobProgress) => void
+    onProgress?: (p: JobProgress) => void,
+    jobId?: string
   ): Promise<PdfProcessResult> {
-    const jobId = `pdf_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const id = jobId || `pdf_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     let unsub: (() => void) | null = null;
     if (onProgress) {
-      unsub = this.onProgress(jobId, onProgress);
+      unsub = this.onProgress(id, onProgress);
     }
     try {
-      return await SquishhEngine.imagesToPdf({ jobId, imagePaths });
+      return await SquishhEngine.imagesToPdf({ jobId: id, imagePaths });
     } finally {
       unsub?.();
     }
   }
 
   async compressPdf(
-    options: { inputPath: string; targetSizeBytes?: number; compressionLevel?: 'light' | 'balanced' | 'highly'; quality?: number },
+    options: {
+      inputPath: string;
+      jobId?: string;
+      compressionLevel?: 'light' | 'balanced' | 'highly';
+    },
     onProgress?: (p: JobProgress) => void
   ): Promise<PdfProcessResult> {
-    const jobId = `pdf_slim_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const id = options.jobId || `pdf_slim_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     let unsub: (() => void) | null = null;
     if (onProgress) {
-      unsub = this.onProgress(jobId, onProgress);
+      unsub = this.onProgress(id, onProgress);
     }
     try {
-      return await SquishhEngine.compressPdf({ ...options, jobId });
+      return await SquishhEngine.compressPdf({ ...options, jobId: id });
     } finally {
       unsub?.();
     }
@@ -265,22 +288,22 @@ class EngineManager {
   async pdfToImages(
     inputPath: string,
     targetFormat: 'jpg' | 'png' = 'jpg',
-    onProgress?: (p: JobProgress) => void
+    onProgress?: (p: JobProgress) => void,
+    jobId?: string
   ): Promise<PdfToImagesResult> {
-    const jobId = `pdf_ext_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const id = jobId || `pdf_ext_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     let unsub: (() => void) | null = null;
     if (onProgress) {
-      unsub = this.onProgress(jobId, onProgress);
+      unsub = this.onProgress(id, onProgress);
     }
     try {
-      return await SquishhEngine.pdfToImages({ jobId, inputPath, targetFormat });
+      return await SquishhEngine.pdfToImages({ jobId: id, inputPath, targetFormat });
     } finally {
       unsub?.();
     }
   }
 
   async cancelJob(jobId: string): Promise<boolean> {
-    this.progressListeners.delete(jobId);
     const result = await SquishhEngine.cancelJob({ jobId });
     return result.success;
   }
@@ -311,6 +334,30 @@ class EngineManager {
     } else {
       if (typeof navigator !== 'undefined' && (navigator as any).share) {
         try {
+          // Attempt Web Share with actual files if available
+          const filesToShare: File[] = [];
+          for (const path of filePaths) {
+            if (path.startsWith('blob:') || path.startsWith('data:')) {
+              try {
+                const res = await fetch(path);
+                const blob = await res.blob();
+                const filename = `squished_${Date.now()}.${blob.type.split('/')[1] || 'bin'}`;
+                filesToShare.push(new File([blob], filename, { type: blob.type }));
+              } catch {
+                // Fall back to title/text sharing
+              }
+            }
+          }
+
+          if (filesToShare.length > 0 && (navigator as any).canShare?.({ files: filesToShare })) {
+            await (navigator as any).share({
+              files: filesToShare,
+              title: title || 'Squished with Squishh',
+              text: title || 'Squished with Squishh',
+            });
+            return true;
+          }
+
           await (navigator as any).share({
             title: title || 'Squished with Squishh',
             text: title || 'Squished with Squishh',
@@ -338,15 +385,6 @@ class EngineManager {
     } catch (e) {
       console.error('Failed to clear cache:', e);
       return { success: false, freeBytes: 0 };
-    }
-  }
-
-  async getCacheSizeBytes(): Promise<number> {
-    try {
-      const res = await SquishhEngine.getCacheSizeBytes();
-      return res.cacheSizeBytes;
-    } catch {
-      return 0;
     }
   }
 }

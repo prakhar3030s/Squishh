@@ -4,12 +4,16 @@ import android.app.Service
 import android.content.Intent
 import android.os.IBinder
 import android.util.Log
+import org.koin.core.component.KoinComponent
+import org.koin.core.component.inject
 
 /**
  * Background lifecycle service to detect when the app task is closed/swiped away
  * by the user from Recent Apps.
  */
-class SquishhCleanupService : Service() {
+class SquishhCleanupService : Service(), KoinComponent {
+
+    private val fileRepository: FileRepository by inject()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -19,13 +23,14 @@ class SquishhCleanupService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        Log.i("SquishhCleanupService", "App task removed from Recents. Clearing cache instantly.")
-        CacheCleaner.clearAllCache(applicationContext)
-        stopSelf()
+        Log.i("SquishhCleanupService", "App task removed from Recents. Clearing cache asynchronously.")
+        fileRepository.clearAllCacheAsync().invokeOnCompletion {
+            stopSelf()
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        CacheCleaner.clearAllCache(applicationContext)
+        fileRepository.clearAllCacheAsync()
     }
 }

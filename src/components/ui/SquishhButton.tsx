@@ -1,6 +1,6 @@
 import React, { useRef } from 'react';
 import { gsap, useGSAP } from '../../lib/gsap';
-import { haptics } from '../../services/haptics';
+import { useHaptics } from '../../services/ServiceContext';
 
 interface SquishhButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: 'primary' | 'secondary' | 'accent' | 'ghost';
@@ -19,6 +19,7 @@ export function SquishhButton({
   disabled = false,
   ...props
 }: SquishhButtonProps) {
+  const haptics = useHaptics();
   const buttonRef = useRef<HTMLButtonElement>(null);
   const { contextSafe } = useGSAP({ scope: buttonRef });
 

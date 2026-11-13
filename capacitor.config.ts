@@ -7,16 +7,20 @@ const config: CapacitorConfig = {
   server: {
     androidScheme: 'https',
   },
+  cordova: {
+    accessOrigins: [],
+  },
   plugins: {
     SplashScreen: {
       launchShowDuration: 1200,
       launchAutoHide: true,
-      backgroundColor: '#FBF9F5',
+      backgroundColor: '#141618',
       showSpinner: false,
     },
     StatusBar: {
+      // DARK = light system bar icons on the #141618 dark background
       style: 'DARK',
-      backgroundColor: '#FBF9F5',
+      backgroundColor: '#141618',
     },
   },
 };

@@ -56,15 +56,16 @@ class SquishhProcessingService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        CacheCleaner.clearAllCache(applicationContext)
-        stopSelf()
+        CacheCleaner.clearAllCacheAsync(applicationContext).invokeOnCompletion {
+            stopSelf()
+        }
     }
 
     private fun buildNotification(title: String, progress: Int, indeterminate: Boolean): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("squishh")
             .setContentText(title)
-            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setSmallIcon(R.drawable.ic_stat_squishh)
             .setProgress(100, progress, indeterminate)
             .setOngoing(true)
             .setOnlyAlertOnce(true)

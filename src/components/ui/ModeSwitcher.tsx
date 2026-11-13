@@ -1,7 +1,7 @@
 import { useRef } from 'react';
 import { Image, Film, Music, FileText } from 'lucide-react';
 import { Flip, isReducedMotion } from '../../lib/gsap';
-import { haptics } from '../../services/haptics';
+import { useHaptics } from '../../services/ServiceContext';
 
 export type AppMode = 'images' | 'video' | 'audio' | 'pdf';
 
@@ -18,6 +18,7 @@ const MODES: { id: AppMode; label: string; icon: typeof Image }[] = [
 ];
 
 export function ModeSwitcher({ currentMode, onModeChange }: ModeSwitcherProps) {
+  const haptics = useHaptics();
   const containerRef = useRef<HTMLDivElement>(null);
 
   const handleSelect = (mode: AppMode) => {
@@ -42,6 +43,7 @@ export function ModeSwitcher({ currentMode, onModeChange }: ModeSwitcherProps) {
   return (
     <nav
       ref={containerRef}
+      role="tablist"
       className="w-full max-w-sm mx-auto p-1.5 rounded-full bg-[#EDE8E0] dark:bg-[#1D2024] border border-[#E5DFD5] dark:border-[#2D3238] flex items-center justify-between relative shadow-inner"
       aria-label="File Mode Switcher"
     >
@@ -52,8 +54,11 @@ export function ModeSwitcher({ currentMode, onModeChange }: ModeSwitcherProps) {
         return (
           <button
             key={mode.id}
+            type="button"
+            role="tab"
+            aria-selected={isActive}
             onClick={() => handleSelect(mode.id)}
-            className={`relative flex-1 py-2 px-3 rounded-full flex items-center justify-center gap-1.5 text-xs font-medium z-10 transition-colors duration-200 select-none ${
+            className={`relative flex-1 py-2 px-3 rounded-full flex items-center justify-center gap-1.5 text-xs font-medium z-10 transition-colors duration-200 select-none cursor-pointer ${
               isActive
                 ? 'text-[#2C302E] dark:text-[#EDE9E3]'
                 : 'text-[#767B77] dark:text-[#949995] hover:text-[#2C302E] dark:hover:text-[#EDE9E3]'
@@ -61,10 +66,11 @@ export function ModeSwitcher({ currentMode, onModeChange }: ModeSwitcherProps) {
           >
             {isActive && (
               <div
+                aria-hidden="true"
                 className="mode-pill-active absolute inset-0 rounded-full bg-[#FBF9F5] dark:bg-[#2C3036] shadow-sm border border-[#E5DFD5] dark:border-[#383E46] -z-10"
               />
             )}
-            <Icon className="w-3.5 h-3.5 flex-shrink-0" />
+            <Icon className="w-3.5 h-3.5 flex-shrink-0" aria-hidden="true" />
             <span>{mode.label}</span>
           </button>
         );

@@ -1,6 +1,5 @@
 package com.prakhar.squishh
 
-import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
@@ -8,34 +7,29 @@ import android.os.Build
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
-import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
-data class ImageCompressionResult(
-    val outputPath: String,
-    val originalSizeBytes: Long,
-    val compressedSizeBytes: Long,
-    val width: Int,
-    val height: Int,
-    val format: String
-)
+class ImageProcessor(
+    private val fileRepository: FileRepository
+) {
 
-object ImageProcessor {
+    companion object {
+        private const val DEFAULT_MAX_DECODE_DIMENSION = 4096
+        private const val ANTI_BALLOON_CAP_RATIO = 0.95
+        private const val DEFAULT_MIN_QUALITY = 5
+        private const val DEFAULT_MAX_QUALITY = 100
+        private const val DEFAULT_TARGET_QUALITY = 80
+    }
 
     fun process(
-        context: Context,
         inputPath: String,
         targetFormat: String, // "jpg", "png", "webp", "avif"
-        quality: Int = 80,
+        quality: Int = DEFAULT_TARGET_QUALITY,
         targetSizeBytes: Long = 0L,
-        maxDimension: Int = 0,
         cancellationToken: AtomicBoolean? = null,
         onProgress: ((progress: Float) -> Unit)? = null
     ): ImageCompressionResult {
-        val inputFile = File(inputPath)
-        if (!inputFile.exists()) {
-            throw IllegalArgumentException("Input file does not exist: $inputPath")
-        }
+        val inputFile = fileRepository.requireReadableInputFile(inputPath, "Input file")
         val originalSizeBytes = inputFile.length()
         onProgress?.invoke(0.1f)
 
@@ -43,51 +37,48 @@ object ImageProcessor {
             throw InterruptedException("Job cancelled")
         }
 
-        // 1. Decode bitmap safely into software memory
-        var bitmap = decodeBitmap(inputFile)
-        val origWidth = bitmap.width
-        val origHeight = bitmap.height
+        // Read original dimensions without allocating pixel memory
+        val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(inputFile.absolutePath, boundsOptions)
+        val rawWidth = boundsOptions.outWidth
+        val rawHeight = boundsOptions.outHeight
+
+        // 1. Decode bitmap safely with sampling/resolution cap into software memory
+        val bitmap = decodeBitmap(inputFile, DEFAULT_MAX_DECODE_DIMENSION)
+        val origWidth = if (rawWidth > 0) rawWidth else bitmap.width
+        val origHeight = if (rawHeight > 0) rawHeight else bitmap.height
         onProgress?.invoke(0.3f)
 
         if (cancellationToken?.get() == true) {
             bitmap.recycle()
             throw InterruptedException("Job cancelled")
         }
-
-        // 2. Downscale dimension if maxDimension is specified
-        if (maxDimension > 0 && (bitmap.width > maxDimension || bitmap.height > maxDimension)) {
-            val ratio = bitmap.width.toFloat() / bitmap.height.toFloat()
-            val newW = if (ratio >= 1) maxDimension else (maxDimension * ratio).toInt()
-            val newH = if (ratio >= 1) (maxDimension / ratio).toInt() else maxDimension
-            val scaled = Bitmap.createScaledBitmap(bitmap, newW, newH, true)
-            if (scaled != bitmap) {
-                bitmap.recycle()
-                bitmap = scaled
-            }
-        }
         onProgress?.invoke(0.5f)
 
         // 3. Resolve target compress format
         val compressFormat = resolveCompressFormat(targetFormat)
-        val outputDir = File(context.cacheDir, "squishh_out").apply { mkdirs() }
         val ext = when (targetFormat.lowercase()) {
             "png" -> "png"
             "webp" -> "webp"
             "avif" -> if (isAvifSupported()) "avif" else "webp"
             else -> "jpg"
         }
-        val outputFile = File(outputDir, "squishh_${System.currentTimeMillis()}_${UUID.randomUUID()}.$ext")
+        val outputFile = fileRepository.allocateOutputFile("squishh", ext)
 
         var finalWidth = bitmap.width
         var finalHeight = bitmap.height
 
         // 4. Compression (Target Size Binary Search OR Fixed Quality with Anti-Ballooning Guard)
         // Rule: A file compressor must NEVER expand a file beyond its original size.
-        val maxAllowedCap = (originalSizeBytes * 0.95).toLong().coerceAtLeast(512L)
+        val maxAllowedCap = if (originalSizeBytes > 1L) {
+            (originalSizeBytes * ANTI_BALLOON_CAP_RATIO).toLong().coerceAtLeast(1L).coerceAtMost(originalSizeBytes - 1L)
+        } else {
+            1L
+        }
 
         if (targetSizeBytes > 0L) {
             // Compress to target size, capped so it never expands smaller files
-            val effectiveTargetBytes = if (originalSizeBytes > 1024L) {
+            val effectiveTargetBytes = if (originalSizeBytes > 0L) {
                 minOf(targetSizeBytes, maxAllowedCap)
             } else {
                 targetSizeBytes
@@ -105,13 +96,14 @@ object ImageProcessor {
             finalHeight = dims.second
         } else {
             // Fixed quality compression
-            val clampedQuality = quality.coerceIn(5, 100)
+            val clampedQuality = quality.coerceIn(DEFAULT_MIN_QUALITY, DEFAULT_MAX_QUALITY)
             val stream = ByteArrayOutputStream()
             bitmap.compress(compressFormat, clampedQuality, stream)
             val initialBytes = stream.toByteArray()
 
-            if (initialBytes.size > originalSizeBytes && originalSizeBytes > 1024L) {
-                // Ballooning detected! (e.g. 115 KB image decoded and re-encoded at 92% becomes 1 MB).
+            if (initialBytes.size > originalSizeBytes && originalSizeBytes > 0L) {
+                // Ballooning detected! (e.g. 115 KB image decoded and re-encoded at 92% becomes 1 MB,
+                // or a small file <= 1024 B expands on re-encode).
                 // Squishh must NEVER expand the file. Adaptively compress down below original size.
                 val dims = compressToTargetSize(
                     bitmap,
@@ -125,7 +117,9 @@ object ImageProcessor {
                 finalHeight = dims.second
 
                 // Safety fallback if format is identical and even aggressive squishing couldn't beat original
-                if (outputFile.exists() && outputFile.length() >= originalSizeBytes && inputFile.extension.equals(ext, ignoreCase = true)) {
+                val inExt = inputFile.extension.lowercase()
+                val sameFormat = inExt == ext || (inExt == "jpeg" && ext == "jpg")
+                if (outputFile.exists() && outputFile.length() >= originalSizeBytes && sameFormat) {
                     inputFile.copyTo(outputFile, overwrite = true)
                     finalWidth = origWidth
                     finalHeight = origHeight
@@ -155,17 +149,36 @@ object ImageProcessor {
         )
     }
 
-    private fun decodeBitmap(file: File): Bitmap {
+    private fun decodeBitmap(file: File, maxDecodeDimension: Int): Bitmap {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val source = ImageDecoder.createSource(file)
-            ImageDecoder.decodeBitmap(source) { decoder, _, _ ->
+            ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
                 // Ensure software allocation so Bitmap.compress never fails on hardware buffers
                 decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
                 decoder.isMutableRequired = true
+                val srcW = info.size.width
+                val srcH = info.size.height
+                if (maxDecodeDimension > 0 && (srcW > maxDecodeDimension || srcH > maxDecodeDimension)) {
+                    val scale = maxDecodeDimension.toFloat() / maxOf(srcW, srcH).toFloat()
+                    val targetW = (srcW * scale).toInt().coerceAtLeast(1)
+                    val targetH = (srcH * scale).toInt().coerceAtLeast(1)
+                    decoder.setTargetSize(targetW, targetH)
+                }
             }
         } else {
+            val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.absolutePath, boundsOptions)
+            var sampleSize = 1
+            if (maxDecodeDimension > 0 && boundsOptions.outWidth > 0 && boundsOptions.outHeight > 0) {
+                while ((boundsOptions.outWidth / sampleSize) > maxDecodeDimension ||
+                    (boundsOptions.outHeight / sampleSize) > maxDecodeDimension
+                ) {
+                    sampleSize *= 2
+                }
+            }
             val options = BitmapFactory.Options().apply {
                 inPreferredConfig = Bitmap.Config.ARGB_8888
+                inSampleSize = sampleSize
             }
             BitmapFactory.decodeFile(file.absolutePath, options)
                 ?: throw IllegalStateException("Failed to decode image bitmap from ${file.name}")

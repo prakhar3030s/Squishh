@@ -6,17 +6,19 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileInputStream
 
 object MediaExporter {
 
-    fun exportToSystem(
+    suspend fun exportToSystem(
         context: Context,
         sourceFilePath: String,
         mediaType: String, // "image", "video", "audio", "pdf"
         targetFileName: String
-    ): String {
+    ): String = withContext(Dispatchers.IO) {
         val sourceFile = File(sourceFilePath)
         if (!sourceFile.exists()) {
             throw IllegalArgumentException("Source file does not exist at path: $sourceFilePath")
@@ -47,7 +49,7 @@ object MediaExporter {
                 MediaStore.Video.Media.EXTERNAL_CONTENT_URI
             }
             "audio" -> {
-                values.put(MediaStore.Audio.Media.MIME_TYPE, getMimeType(targetFileName, "audio/mpeg"))
+                values.put(MediaStore.Audio.Media.MIME_TYPE, getMimeType(targetFileName, "audio/mp4"))
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     values.put(MediaStore.Audio.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MUSIC}/Squishh")
                 }
@@ -67,22 +69,29 @@ object MediaExporter {
         val itemUri = contentResolver.insert(collectionUri, values)
             ?: throw IllegalStateException("Failed to insert new item into MediaStore for type: $mediaType")
 
-        // Stream source bytes into public MediaStore destination
-        contentResolver.openOutputStream(itemUri)?.use { outStream ->
-            FileInputStream(sourceFile).use { inStream ->
-                inStream.copyTo(outStream)
-            }
-        } ?: throw IllegalStateException("Failed to open output stream for inserted item: $itemUri")
+        try {
+            // Stream source bytes into public MediaStore destination off the main thread
+            contentResolver.openOutputStream(itemUri)?.use { outStream ->
+                FileInputStream(sourceFile).use { inStream ->
+                    inStream.copyTo(outStream)
+                }
+            } ?: throw IllegalStateException("Failed to open output stream for inserted item: $itemUri")
 
-        // Release IS_PENDING flag so the media scanner indexes it immediately
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val updateValues = ContentValues().apply {
-                put(MediaStore.MediaColumns.IS_PENDING, 0)
+            // Release IS_PENDING flag so the media scanner indexes it immediately
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val updateValues = ContentValues().apply {
+                    put(MediaStore.MediaColumns.IS_PENDING, 0)
+                }
+                contentResolver.update(itemUri, updateValues, null, null)
             }
-            contentResolver.update(itemUri, updateValues, null, null)
+        } catch (e: Exception) {
+            try {
+                contentResolver.delete(itemUri, null, null)
+            } catch (_: Exception) {}
+            throw e
         }
 
-        return itemUri.toString()
+        return@withContext itemUri.toString()
     }
 
     private fun getMimeType(fileName: String, fallback: String): String {
@@ -98,7 +107,8 @@ object MediaExporter {
             "webm" -> "video/webm"
             "gif" -> "image/gif"
             "mp3" -> "audio/mpeg"
-            "aac", "m4a" -> "audio/aac"
+            "m4a" -> "audio/mp4"
+            "aac" -> "audio/aac"
             "wav" -> "audio/wav"
             "ogg" -> "audio/ogg"
             "flac" -> "audio/flac"

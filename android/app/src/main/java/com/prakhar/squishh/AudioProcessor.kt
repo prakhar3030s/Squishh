@@ -1,13 +1,20 @@
 package com.prakhar.squishh
 
 import android.content.Context
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.audio.AudioProcessor
+import androidx.media3.common.audio.ChannelMixingAudioProcessor
+import androidx.media3.common.audio.ChannelMixingMatrix
+import androidx.media3.transformer.AudioEncoderSettings
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.DefaultEncoderFactory
 import androidx.media3.transformer.EditedMediaItem
+import androidx.media3.transformer.Effects
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.ProgressHolder
@@ -16,40 +23,26 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.FileInputStream
-import java.io.FileOutputStream
-import java.io.RandomAccessFile
-import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
-data class AudioCompressionResult(
-    val outputPath: String,
-    val originalSizeBytes: Long,
-    val compressedSizeBytes: Long,
-    val durationMs: Long,
-    val bitrateKbps: Int,
-    val format: String
-)
-
-object AudioProcessor {
+class AudioProcessor(
+    private val context: Context,
+    private val fileRepository: FileRepository
+) {
 
     suspend fun process(
-        context: Context,
         inputPath: String,
-        targetFormat: String = "m4a", // "m4a", "aac", "wav", "mp3"
+        targetFormat: String = "m4a", // "m4a", "aac" (MP3/WAV are not encodable by Media3)
         bitrateKbps: Int = 128, // 64, 128, 192, 320
         monoDownmix: Boolean = false,
         extractFromVideo: Boolean = false,
         cancellationToken: AtomicBoolean? = null,
         onProgress: ((progress: Float) -> Unit)? = null
     ): AudioCompressionResult = withContext(Dispatchers.IO) {
-        val inputFile = File(inputPath)
-        if (!inputFile.exists()) {
-            throw IllegalArgumentException("Input audio file does not exist: $inputPath")
-        }
+        val inputFile = fileRepository.requireReadableInputFile(inputPath, "Input audio file")
         val originalSizeBytes = inputFile.length()
 
-        // 1. Extract metadata via MediaMetadataRetriever
+        // 1. Extract metadata via MediaMetadataRetriever & MediaExtractor
         val retriever = MediaMetadataRetriever()
         var durationMs = 0L
         try {
@@ -60,26 +53,64 @@ object AudioProcessor {
             try { retriever.release() } catch (_: Exception) {}
         }
 
-        val outputDir = File(context.cacheDir, "squishh_out").apply { mkdirs() }
-        val ext = when (targetFormat.lowercase()) {
-            "wav" -> "wav"
-            "aac" -> "aac"
-            "mp3" -> "mp3"
-            else -> "m4a"
+        var channelCount = 2
+        if (monoDownmix) {
+            val extractor = MediaExtractor()
+            try {
+                extractor.setDataSource(inputFile.absolutePath)
+                for (i in 0 until extractor.trackCount) {
+                    val format = extractor.getTrackFormat(i)
+                    val mime = format.getString(MediaFormat.KEY_MIME)
+                    if (mime?.startsWith("audio/") == true && format.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
+                        channelCount = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                        break
+                    }
+                }
+            } catch (_: Exception) {
+            } finally {
+                try { extractor.release() } catch (_: Exception) {}
+            }
         }
-        val outputFile = File(outputDir, "squishh_audio_${System.currentTimeMillis()}_${UUID.randomUUID()}.$ext")
+
+        // Media3 only encodes AAC into an MP4/M4A container.
+        val ext = "m4a"
+        val safeBitrateKbps = bitrateKbps.coerceIn(32, 320)
+        val outputFile = fileRepository.allocateOutputFile("squishh_audio", ext)
 
         // 2. Hardware Transcoding / Extraction via Media3 Transformer
         val deferred = CompletableDeferred<ExportResult>()
+
+        // Build the audio processor chain (mono downmix when requested).
+        val audioProcessors = mutableListOf<AudioProcessor>()
+        if (monoDownmix) {
+            val mixing = ChannelMixingAudioProcessor()
+            // Register common channel layouts plus detected track channelCount so any audio stream can downmix to mono.
+            val supportedCounts = mutableSetOf(1, 2, 4, 6, 8)
+            if (channelCount > 0) {
+                supportedCounts.add(channelCount)
+            }
+            for (inChannels in supportedCounts) {
+                val coefficients = FloatArray(inChannels) { 1f / inChannels }
+                mixing.putChannelMixingMatrix(ChannelMixingMatrix(inChannels, 1, coefficients))
+            }
+            audioProcessors.add(mixing)
+        }
+
         val editedMediaItem = EditedMediaItem.Builder(MediaItem.fromUri(Uri.fromFile(inputFile)))
             .setRemoveVideo(true) // Strip video tracks to extract or produce clean audio
+            .setEffects(Effects(audioProcessors, emptyList()))
             .build()
 
         var transformerInstance: Transformer? = null
 
         withContext(Dispatchers.Main) {
+            val audioEncoderSettings = AudioEncoderSettings.Builder()
+                .setBitrate(safeBitrateKbps * 1000)
+                .build()
+
             val encoderFactory = DefaultEncoderFactory.Builder(context.applicationContext)
                 .setEnableFallback(true)
+                .setRequestedAudioEncoderSettings(audioEncoderSettings)
                 .build()
 
             val transformer = Transformer.Builder(context.applicationContext)
@@ -132,7 +163,7 @@ object AudioProcessor {
             originalSizeBytes = originalSizeBytes,
             compressedSizeBytes = outputFile.length(),
             durationMs = durationMs,
-            bitrateKbps = bitrateKbps,
+            bitrateKbps = safeBitrateKbps,
             format = ext
         )
     }

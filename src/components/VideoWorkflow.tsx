@@ -1,20 +1,24 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Capacitor } from '@capacitor/core';
-import { engineManager, formatBytes, formatEta, humanizeError } from '../services/engineManager';
-import { haptics } from '../services/haptics';
+import { formatBytes, formatEta, WorkflowFile } from '../services/engineManager';
+import { useEngineManager, useHaptics } from '../services/ServiceContext';
+import { GIF_PREVIEW_DIMENSIONS, VIDEO_COMPRESSION_PRESETS } from '../constants/compression';
+import { useWorkflow } from '../hooks/useWorkflow';
+import {
+  WorkflowDoneShell,
+  WorkflowDropZone,
+  WorkflowErrorBanner,
+  WorkflowProgressCard,
+} from './workflow/WorkflowStageUI';
 import { VideoProcessResult } from '../plugins/squishhEngine';
 import { SquishhButton } from './ui/SquishhButton';
+import { gsap, useGSAP } from '../lib/gsap';
 import {
   Film,
   Target,
-  CheckCircle2,
-  Share2,
-  Download,
-  RotateCcw,
   Sparkles,
   VolumeX,
-  Volume2,
-  AlertCircle
+  Volume2
 } from 'lucide-react';
 
 interface SelectedVideo {
@@ -24,8 +28,31 @@ interface SelectedVideo {
   previewUrl: string;
 }
 
-export function VideoWorkflow() {
-  const [stage, setStage] = useState<'idle' | 'configuring' | 'processing' | 'done'>('idle');
+interface VideoWorkflowProps {
+  sharedFile?: WorkflowFile | null;
+  onSharedFileConsumed?: () => void;
+}
+
+export function VideoWorkflow({ sharedFile, onSharedFileConsumed }: VideoWorkflowProps = {}) {
+  const engineManager = useEngineManager();
+  const haptics = useHaptics();
+  const {
+    stage,
+    progress,
+    setProgress,
+    etaMs,
+    setEtaMs,
+    errorMessage,
+    isSaving,
+    savedSuccess,
+    beginConfigure,
+    executeJob,
+    cancelActiveJob,
+    runSave,
+    runShare,
+    resetWorkflow,
+  } = useWorkflow();
+
   const [selectedVideo, setSelectedVideo] = useState<SelectedVideo | null>(null);
   const [operationMode, setOperationMode] = useState<'target' | 'resolution'>('target');
   const [compressionLevel, setCompressionLevel] = useState<'light' | 'balanced' | 'high'>('balanced');
@@ -33,24 +60,61 @@ export function VideoWorkflow() {
   const [fpsLimit, setFpsLimit] = useState<'original' | '60' | '30' | '24'>('30');
   const [muteAudio, setMuteAudio] = useState<boolean>(false);
   const [asGif, setAsGif] = useState<boolean>(false);
-  const [progress, setProgress] = useState<number>(0);
-  const [etaMs, setEtaMs] = useState<number>(0);
-  const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [result, setResult] = useState<VideoProcessResult | null>(null);
-  const [savedSuccess, setSavedSuccess] = useState<boolean>(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const filmIconRef = useRef<HTMLDivElement>(null);
+
+  // GSAP animation for video transcoding reel
+  useGSAP(() => {
+    if (stage === 'processing' && filmIconRef.current) {
+      gsap.to(filmIconRef.current, {
+        rotation: 360,
+        duration: 4,
+        repeat: -1,
+        ease: 'none',
+      });
+      gsap.to(filmIconRef.current, {
+        scale: 1.08,
+        duration: 1.2,
+        repeat: -1,
+        yoyo: true,
+        ease: 'sine.inOut',
+      });
+    }
+  }, [stage]);
+
+  const applySelectedVideo = (item: SelectedVideo) => {
+    setSelectedVideo(item);
+    setResult(null);
+    beginConfigure();
+  };
+
+  useEffect(() => {
+    if (!sharedFile) return;
+    applySelectedVideo(sharedFile);
+    onSharedFileConsumed?.();
+  }, [sharedFile, onSharedFileConsumed]);
+
+  const registerWebChooser = () => {
+    engineManager.setPendingWebChooserHandler((resolved) => {
+      if (resolved.length > 0) {
+        haptics.mediumImpact();
+        applySelectedVideo(resolved[0]);
+      }
+    });
+  };
 
   const handleTriggerPick = async () => {
     haptics.selection();
     const picked = await engineManager.pickFiles('video/*', false);
-    if (picked.length > 0) {
-      setSelectedVideo(picked[0]);
-      setStage('configuring');
-      setErrorMessage(null);
+    if (picked !== null) {
+      if (picked.length > 0) {
+        applySelectedVideo(picked[0]);
+      }
       return;
     }
+    registerWebChooser();
     fileInputRef.current?.click();
   };
 
@@ -60,107 +124,66 @@ export function VideoWorkflow() {
 
     haptics.mediumImpact();
     const item = await engineManager.cacheWebFile(file);
-    setSelectedVideo(item);
-    setStage('configuring');
-    setErrorMessage(null);
+    applySelectedVideo(item);
   };
 
   const handleStartCompression = async () => {
     if (!selectedVideo) return;
 
-    haptics.mediumImpact();
-    setStage('processing');
-    setProgress(0);
-    setEtaMs(0);
-    setErrorMessage(null);
-    setSavedSuccess(false);
-
-    const jobId = `vid_${Date.now()}`;
-    setActiveJobId(jobId);
-
     const targetResolution = operationMode === 'resolution' ? resolution : 'original';
     const targetFps = operationMode === 'resolution' && fpsLimit !== 'original' ? parseInt(fpsLimit) : 0;
 
-    try {
-      const res = await engineManager.compressVideo(
-        {
-          jobId,
-          inputPath: selectedVideo.uri,
-          compressionLevel: operationMode === 'target' ? compressionLevel : undefined,
-          targetSizeBytes: 0,
-          resolution: targetResolution,
-          fpsLimit: targetFps,
-          muteAudio,
-          asGif,
-        },
-        (p) => {
-          setProgress(Math.round(p.progress * 100));
-          setEtaMs(p.etaRemainingMs);
-        }
-      );
-
-      setResult(res);
-      setStage('done');
-      haptics.success();
-    } catch (err: any) {
-      if (err.message?.includes('cancelled')) {
-        setStage('configuring');
-      } else {
-        setErrorMessage(humanizeError(err, "couldn't squish this video, maybe the codec's unusual?"));
-        setStage('configuring');
-        haptics.error();
-      }
-    }
+    await executeJob({
+      jobId: `vid_${Date.now()}`,
+      fallbackError: "couldn't squish this video, maybe the codec's unusual?",
+      run: async (jobId) => {
+        const res = await engineManager.compressVideo(
+          {
+            jobId,
+            inputPath: selectedVideo.uri,
+            compressionLevel: operationMode === 'target' ? compressionLevel : undefined,
+            resolution: targetResolution,
+            fpsLimit: targetFps,
+            muteAudio,
+            asGif,
+          },
+          (p) => {
+            setProgress(Math.round(p.progress * 100));
+            setEtaMs(p.etaRemainingMs);
+          }
+        );
+        setResult(res);
+      },
+    });
   };
 
-  const handleCancel = async () => {
-    if (activeJobId) {
-      await engineManager.cancelJob(activeJobId);
-      setActiveJobId(null);
-      setStage('configuring');
-    }
-  };
-
-  const handleSaveToGallery = async () => {
+  const handleSaveToGallery = () => {
     if (!result) return;
-    try {
-      const ext = result.isGif ? 'gif' : 'mp4';
+    return runSave(async () => {
+      const pathExt = result.outputPath.split('.').pop()?.split('?')[0]?.toLowerCase();
+      const ext = result.isGif ? 'gif' : (pathExt && /^[a-z0-9]{2,5}$/.test(pathExt) ? pathExt : 'mp4');
       await engineManager.saveOutputToGallery(
         result.outputPath,
         result.isGif ? 'image' : 'video',
         `squishh_${Date.now()}.${ext}`
       );
-      setSavedSuccess(true);
-      haptics.success();
-    } catch (e: any) {
-      alert(`Save failed: ${e.message}`);
-    }
+    }, 'failed to save video to gallery');
   };
 
-  const handleShare = async () => {
+  const handleShare = () => {
     if (!result) return;
-    try {
-      haptics.selection();
-      const title = result.isGif ? 'Squished GIF' : 'Squished Video';
-      await engineManager.shareFiles([result.outputPath], title);
-    } catch {
-      // User dismissed share
-    }
+    const title = result.isGif ? 'Squished GIF' : 'Squished Video';
+    return runShare(() => engineManager.shareFiles([result.outputPath], title));
   };
 
-  const resetAll = () => {
-    haptics.selection();
-    setStage('idle');
-    setSelectedVideo(null);
-    setResult(null);
-    setProgress(0);
-    setEtaMs(0);
-    setSavedSuccess(false);
-    setErrorMessage(null);
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-    }
-  };
+  const resetAll = () =>
+    resetWorkflow(() => {
+      setSelectedVideo(null);
+      setResult(null);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    });
 
   return (
     <div className="w-full flex flex-col gap-4">
@@ -168,43 +191,23 @@ export function VideoWorkflow() {
         ref={fileInputRef}
         type="file"
         accept="video/*"
+        onClick={registerWebChooser}
         onChange={handleFileChange}
         className="hidden"
         id="video-file-input"
       />
 
-      {errorMessage && (
-        <div className="p-3.5 rounded-2xl bg-[#F6D6C6]/80 dark:bg-[#4A352D]/80 border border-[#EAC5B3] dark:border-[#5C4237] text-xs flex items-center gap-2 text-[#4A352D] dark:text-[#F6D6C6]">
-          <AlertCircle className="w-4 h-4 flex-shrink-0" />
-          <span>{errorMessage}</span>
-        </div>
-      )}
+      <WorkflowErrorBanner message={errorMessage} />
 
       {/* STAGE 1: IDLE / DROP ZONE */}
       {stage === 'idle' && (
-        <div
+        <WorkflowDropZone
           onClick={handleTriggerPick}
-          className="p-8 rounded-3xl border-2 border-dashed border-[#DDD7CC] dark:border-[#383E46] bg-[#FBF9F5]/80 dark:bg-[#141618]/80 flex flex-col items-center text-center cursor-pointer transition-all hover:border-[#4A6B53] dark:hover:border-[#76A183] active:scale-[0.99]"
-        >
-          <div className="w-14 h-14 rounded-2xl bg-[#EDE8E0] dark:bg-[#24282D] flex items-center justify-center text-[#4A6B53] dark:text-[#76A183] mb-3.5 shadow-sm">
-            <Film className="w-7 h-7" />
-          </div>
-          <p className="text-base font-bold mb-1">drop video here or tap to pick</p>
-          <p className="text-xs text-[#767B77] dark:text-[#949995] mb-5">
-            MP4, MOV, MKV, WebM &bull; hardware Media3 transcoding
-          </p>
-
-          <SquishhButton
-            size="md"
-            variant="primary"
-            onClick={(e) => {
-              e.stopPropagation();
-              handleTriggerPick();
-            }}
-          >
-            select video
-          </SquishhButton>
-        </div>
+          icon={<Film className="w-7 h-7" />}
+          title="drop video here or tap to pick"
+          subtitle="MP4, MOV, MKV, WebM • hardware Media3 transcoding"
+          buttonLabel="select video"
+        />
       )}
 
       {/* STAGE 2: CONFIGURING OPTIONS */}
@@ -222,46 +225,52 @@ export function VideoWorkflow() {
               </p>
             </div>
             <button
-              onClick={() => fileInputRef.current?.click()}
-              className="text-xs text-[#4A6B53] dark:text-[#76A183] font-medium px-2 py-1 rounded-lg hover:underline"
+              type="button"
+              onClick={handleTriggerPick}
+              aria-label="Change selected video"
+              className="text-xs text-[#4A6B53] dark:text-[#76A183] font-medium px-2 py-1 rounded-lg hover:underline cursor-pointer"
             >
               change
             </button>
           </div>
 
           {/* Operation Mode Selector: Target Limit vs Resolution & Frames */}
-          <div className="flex p-1 bg-[#EDE8E0] dark:bg-[#24282D] rounded-2xl">
+          <div role="tablist" aria-label="Video compression mode" className="flex p-1 bg-[#EDE8E0] dark:bg-[#24282D] rounded-2xl">
             <button
               type="button"
+              role="tab"
+              aria-selected={operationMode === 'target' && !asGif}
               onClick={() => {
                 setOperationMode('target');
                 setAsGif(false);
                 haptics.selection();
               }}
-              className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
+              className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 select-none cursor-pointer ${
                 operationMode === 'target' && !asGif
                   ? 'bg-[#FBF9F5] dark:bg-[#141618] text-[#4A6B53] dark:text-[#76A183] shadow-sm'
                   : 'text-[#767B77] dark:text-[#949995]'
               }`}
             >
-              <Target className="w-3.5 h-3.5" />
+              <Target className="w-3.5 h-3.5" aria-hidden="true" />
               <span>target limit</span>
             </button>
 
             <button
               type="button"
+              role="tab"
+              aria-selected={operationMode === 'resolution' && !asGif}
               onClick={() => {
                 setOperationMode('resolution');
                 setAsGif(false);
                 haptics.selection();
               }}
-              className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
+              className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 select-none cursor-pointer ${
                 operationMode === 'resolution' && !asGif
                   ? 'bg-[#FBF9F5] dark:bg-[#141618] text-[#4A6B53] dark:text-[#76A183] shadow-sm'
                   : 'text-[#767B77] dark:text-[#949995]'
               }`}
             >
-              <Film className="w-3.5 h-3.5" />
+              <Film className="w-3.5 h-3.5" aria-hidden="true" />
               <span>resolution & frames</span>
             </button>
           </div>
@@ -269,69 +278,47 @@ export function VideoWorkflow() {
           {/* Operation Details Card */}
           {operationMode === 'target' && !asGif && (
             <div className="p-4 rounded-2xl bg-[#FBF9F5] dark:bg-[#141618] border border-[#E5DFD5] dark:border-[#2D3238] flex flex-col gap-3 text-left">
-              <label className="text-xs font-semibold text-[#767B77] dark:text-[#949995] block">
+              <span className="text-xs font-semibold text-[#767B77] dark:text-[#949995] block">
                 target compression level
-              </label>
+              </span>
 
               <div className="grid grid-cols-3 gap-2 text-xs">
-                {[
-                  {
-                    id: 'light' as const,
-                    label: 'Light',
-                    reduction: '~25%',
-                    estBytes: Math.round(selectedVideo.sizeBytes * 0.75),
-                    desc: 'Crisp quality',
-                  },
-                  {
-                    id: 'balanced' as const,
-                    label: 'Balanced',
-                    reduction: '~50%',
-                    estBytes: Math.round(selectedVideo.sizeBytes * 0.50),
-                    desc: 'Optimal size',
-                  },
-                  {
-                    id: 'high' as const,
-                    label: 'High',
-                    reduction: '~80%',
-                    estBytes: Math.round(selectedVideo.sizeBytes * 0.22),
-                    desc: 'Ultra small',
-                  },
-                ].map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    onClick={() => {
-                      setCompressionLevel(item.id);
-                      haptics.selection();
-                    }}
-                    className={`p-3 rounded-2xl border text-left transition-all ${
-                      compressionLevel === item.id
-                        ? 'border-[#4A6B53] dark:border-[#76A183] bg-[#4A6B53]/10 dark:bg-[#76A183]/15 shadow-sm'
-                        : 'bg-[#EDE8E0]/40 dark:bg-[#1D2024] border-[#E5DFD5] dark:border-[#2D3238] hover:border-[#767B77]'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="font-bold text-xs capitalize">{item.label}</span>
-                      <span className="text-[10px] font-mono font-bold text-[#4A6B53] dark:text-[#76A183]">
-                        {item.reduction}
-                      </span>
-                    </div>
-                    <p className="text-[11px] font-mono font-semibold text-[#2C302E] dark:text-[#EDE9E3]">
-                      &asymp; {formatBytes(item.estBytes)}
-                    </p>
-                    <p className="text-[10px] text-[#767B77] dark:text-[#949995] mt-0.5">
-                      {item.desc}
-                    </p>
-                  </button>
-                ))}
+                {VIDEO_COMPRESSION_PRESETS.map((item) => {
+                  const estBytes = Math.round(selectedVideo.sizeBytes * item.sizeRatio);
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      aria-pressed={compressionLevel === item.id}
+                      onClick={() => {
+                        setCompressionLevel(item.id);
+                        haptics.selection();
+                      }}
+                      className={`p-3 rounded-2xl border text-left transition-all select-none cursor-pointer ${
+                        compressionLevel === item.id
+                          ? 'border-[#4A6B53] dark:border-[#76A183] bg-[#4A6B53]/10 dark:bg-[#76A183]/15 shadow-sm'
+                          : 'bg-[#EDE8E0]/40 dark:bg-[#1D2024] border-[#E5DFD5] dark:border-[#2D3238] hover:border-[#767B77]'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="font-bold text-xs capitalize">{item.label}</span>
+                        <span className="text-[10px] font-mono font-bold text-[#4A6B53] dark:text-[#76A183]">
+                          {item.reduction}
+                        </span>
+                      </div>
+                      <p className="text-[11px] font-mono font-semibold text-[#2C302E] dark:text-[#EDE9E3]">
+                        &asymp; {formatBytes(estBytes)}
+                      </p>
+                      <p className="text-[10px] text-[#767B77] dark:text-[#949995] mt-0.5">
+                        {item.desc}
+                      </p>
+                    </button>
+                  );
+                })}
               </div>
 
               <p className="text-[11px] text-[#767B77] dark:text-[#949995]">
-                {compressionLevel === 'light'
-                  ? 'High bitrate preservation with original resolution. Ideal for keeping pristine quality while shedding unnecessary weight.'
-                  : compressionLevel === 'balanced'
-                  ? 'Reduces file size by ~50% with balanced bitrate and HD scaling. Recommended for everyday sharing and cloud storage.'
-                  : 'Maximum squish down to ~20% of original size with compact downscaling. Great for quick messaging and slow connections.'}
+                {VIDEO_COMPRESSION_PRESETS.find((p) => p.id === compressionLevel)?.detail}
               </p>
             </div>
           )}
@@ -340,8 +327,11 @@ export function VideoWorkflow() {
             <div className="p-4 rounded-2xl bg-[#FBF9F5] dark:bg-[#141618] border border-[#E5DFD5] dark:border-[#2D3238] flex flex-col gap-3 text-left">
               {/* Resolution selection */}
               <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold">resolution:</span>
+                <label htmlFor="video-resolution-select" className="text-xs font-semibold">
+                  resolution:
+                </label>
                 <select
+                  id="video-resolution-select"
                   value={resolution}
                   onChange={(e) => {
                     setResolution(e.target.value as any);
@@ -359,8 +349,11 @@ export function VideoWorkflow() {
 
               {/* FPS Limit selection */}
               <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold">frame rate:</span>
+                <label htmlFor="video-fps-select" className="text-xs font-semibold">
+                  frame rate:
+                </label>
                 <select
+                  id="video-fps-select"
                   value={fpsLimit}
                   onChange={(e) => {
                     setFpsLimit(e.target.value as any);
@@ -384,32 +377,34 @@ export function VideoWorkflow() {
           {/* Audio & GIF Options Card */}
           <div className="p-3.5 rounded-2xl bg-[#FBF9F5] dark:bg-[#141618] border border-[#E5DFD5] dark:border-[#2D3238] flex flex-col gap-2.5 text-left">
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1.5 text-xs font-semibold">
+              <label htmlFor="video-mute-audio" className="flex items-center gap-1.5 text-xs font-semibold cursor-pointer">
                 {muteAudio ? (
-                  <VolumeX className="w-4 h-4 text-[#767B77] dark:text-[#949995]" />
+                  <VolumeX className="w-4 h-4 text-[#767B77] dark:text-[#949995]" aria-hidden="true" />
                 ) : (
-                  <Volume2 className="w-4 h-4 text-[#4A6B53] dark:text-[#76A183]" />
+                  <Volume2 className="w-4 h-4 text-[#4A6B53] dark:text-[#76A183]" aria-hidden="true" />
                 )}
                 <span>mute audio track</span>
-              </div>
+              </label>
               <input
+                id="video-mute-audio"
                 type="checkbox"
                 checked={muteAudio}
                 onChange={(e) => setMuteAudio(e.target.checked)}
-                className="w-4 h-4 accent-[#4A6B53] rounded"
+                className="w-4 h-4 accent-[#4A6B53] rounded cursor-pointer"
               />
             </div>
 
             <div className="flex items-center justify-between pt-2 border-t border-[#E5DFD5] dark:border-[#2D3238]">
-              <div className="flex items-center gap-1.5 text-xs font-semibold">
-                <Sparkles className="w-4 h-4 text-[#4A6B53] dark:text-[#76A183]" />
+              <label htmlFor="video-export-gif" className="flex items-center gap-1.5 text-xs font-semibold cursor-pointer">
+                <Sparkles className="w-4 h-4 text-[#4A6B53] dark:text-[#76A183]" aria-hidden="true" />
                 <span>export as animated GIF loop</span>
-              </div>
+              </label>
               <input
+                id="video-export-gif"
                 type="checkbox"
                 checked={asGif}
                 onChange={(e) => setAsGif(e.target.checked)}
-                className="w-4 h-4 accent-[#4A6B53] rounded"
+                className="w-4 h-4 accent-[#4A6B53] rounded cursor-pointer"
               />
             </div>
           </div>
@@ -433,136 +428,96 @@ export function VideoWorkflow() {
 
       {/* STAGE 3: PROCESSING */}
       {stage === 'processing' && (
-        <div className="p-8 rounded-3xl bg-[#F2EFE9] dark:bg-[#1D2024] border border-[#E5DFD5] dark:border-[#2D3238] flex flex-col items-center text-center">
-          <div className="w-20 h-20 rounded-full bg-[#4A6B53]/15 dark:bg-[#76A183]/20 text-[#4A6B53] dark:text-[#76A183] flex items-center justify-center mb-5 animate-pulse">
-            <Film className="w-9 h-9" />
-          </div>
-
-          <h3 className="text-lg font-bold mb-1">squishing your video…</h3>
-          <p className="text-xs text-[#767B77] dark:text-[#949995] mb-5">
-            hardware transcoding via MediaCodec
-          </p>
-
-          {/* Progress Bar */}
-          <div className="w-full bg-[#E5DFD5] dark:bg-[#2D3238] h-3 rounded-full overflow-hidden mb-3">
+        <WorkflowProgressCard
+          iconSlot={
             <div
-              className="bg-[#4A6B53] dark:bg-[#76A183] h-full transition-all duration-300 rounded-full"
-              style={{ width: `${progress}%` }}
-            />
-          </div>
-
-          <div className="flex items-center justify-between w-full text-xs font-mono font-semibold mb-6 px-1">
-            <span>{progress}% complete</span>
-            <span className="text-[#767B77] dark:text-[#949995]">{formatEta(etaMs)}</span>
-          </div>
-
-          <SquishhButton size="sm" variant="secondary" onClick={handleCancel}>
-            cancel
-          </SquishhButton>
-        </div>
+              ref={filmIconRef}
+              className="w-20 h-20 rounded-full bg-[#4A6B53]/15 dark:bg-[#76A183]/20 text-[#4A6B53] dark:text-[#76A183] flex items-center justify-center mb-5 shadow-sm"
+            >
+              <Film className="w-9 h-9" />
+            </div>
+          }
+          title="squishing your video…"
+          subtitle="hardware transcoding via MediaCodec"
+          progress={progress}
+          etaLabel={formatEta(etaMs)}
+          onCancel={cancelActiveJob}
+        />
       )}
 
       {/* STAGE 4: DONE & SHARE */}
       {stage === 'done' && result && (
-        <div className="flex flex-col gap-4">
-          <div className="p-6 rounded-3xl bg-[#F2EFE9] dark:bg-[#1D2024] border border-[#E5DFD5] dark:border-[#2D3238] text-center flex flex-col items-center">
-            <div className="w-12 h-12 rounded-full bg-[#4A6B53]/15 dark:bg-[#76A183]/20 text-[#4A6B53] dark:text-[#76A183] flex items-center justify-center mb-3">
-              <CheckCircle2 className="w-7 h-7" />
-            </div>
-
-            <h3 className="text-xl font-bold mb-1">all done ✨</h3>
-            <p className="text-xs text-[#767B77] dark:text-[#949995] mb-4">
-              {result.isGif ? 'animated GIF created' : 'video squished to target size'}
-            </p>
-
-            {/* Savings Pill */}
-            {result.originalSizeBytes > 0 && (
-              <div className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-[#E4DDF4] dark:bg-[#3B344D] text-[#4A6B53] dark:text-[#E4DDF4] text-xs font-semibold mb-5">
-                <span>
-                  Saved{' '}
-                  {Math.round(
-                    ((result.originalSizeBytes - result.compressedSizeBytes) /
-                      result.originalSizeBytes) *
-                      100
-                  )}
-                  %
-                </span>
-                <span>&bull;</span>
-                <span>
-                  {formatBytes(result.originalSizeBytes)} &rarr; {formatBytes(result.compressedSizeBytes)}
-                </span>
-              </div>
+        <WorkflowDoneShell
+          subtitle={result.isGif ? 'animated GIF created' : 'video squished to target size'}
+          savings={{
+            originalBytes: result.originalSizeBytes,
+            compressedBytes: result.compressedSizeBytes,
+          }}
+          saveLabel="save to gallery"
+          savingLabel="saving to gallery…"
+          savedLabel="saved to gallery ✓"
+          isSaving={isSaving}
+          savedSuccess={savedSuccess}
+          onSave={handleSaveToGallery}
+          shareLabel="share video"
+          onShare={handleShare}
+          resetLabel="squish another video"
+          onReset={resetAll}
+        >
+          {/* Video or Animated GIF Preview Player */}
+          <div className="w-full h-44 md:h-56 rounded-2xl overflow-hidden bg-black flex items-center justify-center mb-4 border border-[#E5DFD5] dark:border-[#2D3238]">
+            {result.isGif ? (
+              <img
+                src={
+                  result.outputPath.startsWith('blob:')
+                    ? result.outputPath
+                    : Capacitor.convertFileSrc(result.outputPath)
+                }
+                alt="Squished animated GIF"
+                className="w-full h-full object-contain"
+              />
+            ) : (
+              <video
+                src={
+                  result.outputPath.startsWith('blob:')
+                    ? result.outputPath
+                    : Capacitor.convertFileSrc(result.outputPath)
+                }
+                controls
+                playsInline
+                className="w-full h-full object-contain"
+              />
             )}
+          </div>
 
-            {/* Video or Animated GIF Preview Player */}
-            <div className="w-full h-44 rounded-2xl overflow-hidden bg-black flex items-center justify-center mb-4 border border-[#E5DFD5] dark:border-[#2D3238]">
-              {result.isGif ? (
-                <img
-                  src={
-                    result.outputPath.startsWith('blob:')
-                      ? result.outputPath
-                      : Capacitor.convertFileSrc(result.outputPath)
-                  }
-                  alt="Squished GIF"
-                  className="w-full h-full object-contain"
-                />
-              ) : (
-                <video
-                  src={
-                    result.outputPath.startsWith('blob:')
-                      ? result.outputPath
-                      : Capacitor.convertFileSrc(result.outputPath)
-                  }
-                  controls
-                  playsInline
-                  className="w-full h-full object-contain"
-                />
-              )}
+          <div className="grid grid-cols-3 gap-2 w-full text-xs text-left mb-4 md:mb-0">
+            <div className="p-3 rounded-2xl bg-[#FBF9F5] dark:bg-[#141618] border border-[#E5DFD5] dark:border-[#2D3238]">
+              <span className="text-[#767B77] dark:text-[#949995] block text-[10px]">FORMAT</span>
+              <span className="font-bold uppercase">
+                {result.isGif
+                  ? 'GIF'
+                  : (() => {
+                      const ext = result.outputPath.split('.').pop()?.split('?')[0]?.toLowerCase();
+                      return ext && ext !== 'mp4' && /^[a-z0-9]{2,5}$/.test(ext) ? ext : 'MP4 (H.264)';
+                    })()}
+              </span>
             </div>
-
-            <div className="grid grid-cols-2 gap-2 w-full text-xs text-left mb-4">
-              <div className="p-3 rounded-2xl bg-[#FBF9F5] dark:bg-[#141618] border border-[#E5DFD5] dark:border-[#2D3238]">
-                <span className="text-[#767B77] dark:text-[#949995] block text-[10px]">FORMAT</span>
-                <span className="font-bold uppercase">{result.isGif ? 'GIF' : 'MP4 (H.264)'}</span>
-              </div>
-              <div className="p-3 rounded-2xl bg-[#FBF9F5] dark:bg-[#141618] border border-[#E5DFD5] dark:border-[#2D3238]">
-                <span className="text-[#767B77] dark:text-[#949995] block text-[10px]">NEW SIZE</span>
-                <span className="font-mono font-bold">{formatBytes(result.compressedSizeBytes)}</span>
-              </div>
+            <div className="p-3 rounded-2xl bg-[#FBF9F5] dark:bg-[#141618] border border-[#E5DFD5] dark:border-[#2D3238]">
+              <span className="text-[#767B77] dark:text-[#949995] block text-[10px]">DIMENSIONS</span>
+              <span className="font-mono font-bold">
+                {result.width > 0 && result.height > 0
+                  ? `${result.width}×${result.height}`
+                  : result.isGif
+                  ? `${GIF_PREVIEW_DIMENSIONS.width}w`
+                  : 'Original'}
+              </span>
             </div>
-
-            {/* Actions */}
-            <div className="flex flex-col gap-2 w-full">
-              <SquishhButton
-                size="md"
-                variant="primary"
-                onClick={handleSaveToGallery}
-                icon={<Download className="w-4 h-4" />}
-                className="w-full"
-              >
-                {savedSuccess ? 'saved to gallery ✓' : 'save to gallery'}
-              </SquishhButton>
-
-              <SquishhButton
-                size="md"
-                variant="secondary"
-                onClick={handleShare}
-                icon={<Share2 className="w-4 h-4" />}
-                className="w-full"
-              >
-                share video
-              </SquishhButton>
-
-              <button
-                onClick={resetAll}
-                className="mt-2 text-xs text-[#767B77] dark:text-[#949995] hover:text-[#2C302E] dark:hover:text-[#EDE9E3] flex items-center justify-center gap-1.5"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-                <span>squish another video</span>
-              </button>
+            <div className="p-3 rounded-2xl bg-[#FBF9F5] dark:bg-[#141618] border border-[#E5DFD5] dark:border-[#2D3238]">
+              <span className="text-[#767B77] dark:text-[#949995] block text-[10px]">NEW SIZE</span>
+              <span className="font-mono font-bold">{formatBytes(result.compressedSizeBytes)}</span>
             </div>
           </div>
-        </div>
+        </WorkflowDoneShell>
       )}
     </div>
   );

@@ -1,13 +1,9 @@
 package com.prakhar.squishh
 
-import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.Rect
-import android.graphics.pdf.PdfDocument
 import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
 import kotlinx.coroutines.Dispatchers
@@ -15,30 +11,53 @@ import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
-import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
-data class PdfCompressionResult(
-    val outputPath: String,
-    val pageCount: Int,
-    val originalSizeBytes: Long,
-    val compressedSizeBytes: Long
-)
+class PdfProcessor(
+    private val fileRepository: FileRepository
+) {
 
-data class PdfToImagesResult(
-    val imagePaths: List<String>,
-    val pageCount: Int,
-    val totalSizeBytes: Long
-)
+    companion object {
+        private const val MAX_PDF_IMAGE_DIMENSION = 2048
+    }
 
-object PdfProcessor {
+    private fun capDimensions(width: Int, height: Int, maxDimension: Int): Pair<Int, Int> {
+        val safeW = width.coerceAtLeast(1)
+        val safeH = height.coerceAtLeast(1)
+        if (safeW <= maxDimension && safeH <= maxDimension) {
+            return Pair(safeW, safeH)
+        }
+        val scale = maxDimension.toFloat() / maxOf(safeW, safeH).toFloat()
+        return Pair(
+            (safeW * scale).toInt().coerceAtLeast(1),
+            (safeH * scale).toInt().coerceAtLeast(1)
+        )
+    }
+
+    private fun decodeSampledBitmap(file: File, maxDimension: Int): Bitmap? {
+        val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, boundsOpts)
+        if (boundsOpts.outWidth <= 0 || boundsOpts.outHeight <= 0) {
+            return BitmapFactory.decodeFile(file.absolutePath)
+        }
+        var sampleSize = 1
+        while ((boundsOpts.outWidth / sampleSize) > maxDimension ||
+            (boundsOpts.outHeight / sampleSize) > maxDimension
+        ) {
+            sampleSize *= 2
+        }
+        val decodeOpts = BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        return BitmapFactory.decodeFile(file.absolutePath, decodeOpts)
+    }
 
     /**
      * Converts a collection of images into a unified, lean, high-fidelity PDF document.
      * Uses native JPEG DCTDecode streams for extreme compression without Deflate bloat.
      */
     suspend fun imagesToPdf(
-        context: Context,
         imagePaths: List<String>,
         cancellationToken: AtomicBoolean? = null,
         onProgress: ((progress: Float) -> Unit)? = null
@@ -48,11 +67,11 @@ object PdfProcessor {
         }
 
         val totalOriginalBytes = imagePaths.sumOf { File(it).length() }
-        val outputDir = File(context.cacheDir, "squishh_out").apply { mkdirs() }
-        val outputFile = File(outputDir, "squishh_doc_${System.currentTimeMillis()}_${UUID.randomUUID()}.pdf")
+        val outputFile = fileRepository.allocateOutputFile("squishh_doc", "pdf")
 
         val pdfWriter = JpegPdfWriter(outputFile)
         val totalCount = imagePaths.size
+        var writtenPages = 0
 
         for ((index, path) in imagePaths.withIndex()) {
             if (cancellationToken?.get() == true) throw InterruptedException("PDF generation cancelled")
@@ -60,19 +79,41 @@ object PdfProcessor {
             val imgFile = File(path)
             if (!imgFile.exists()) continue
 
-            val bitmap = BitmapFactory.decodeFile(imgFile.absolutePath) ?: continue
+            val decoded = decodeSampledBitmap(imgFile, MAX_PDF_IMAGE_DIMENSION) ?: continue
 
-            // Standard A4 aspect: 595 x 842 points (72 points/inch)
-            val ptW = 595f
-            val ptH = 842f
-            val stream = ByteArrayOutputStream()
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 85, stream)
-            val jpegBytes = stream.toByteArray()
+            // Flatten alpha onto white background so PNG/WebP transparency doesn't render black in JPEG
+            val jpegBitmap = if (decoded.hasAlpha()) {
+                val flattened = Bitmap.createBitmap(decoded.width, decoded.height, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(flattened)
+                canvas.drawColor(Color.WHITE)
+                canvas.drawBitmap(decoded, 0f, 0f, null)
+                decoded.recycle()
+                flattened
+            } else {
+                decoded
+            }
 
-            pdfWriter.addPage(jpegBytes, bitmap.width, bitmap.height, ptW, ptH)
-            bitmap.recycle()
+            val imgW = jpegBitmap.width
+            val imgH = jpegBitmap.height
+            val jpegBytes = try {
+                val stream = ByteArrayOutputStream()
+                jpegBitmap.compress(Bitmap.CompressFormat.JPEG, 85, stream)
+                stream.toByteArray()
+            } finally {
+                jpegBitmap.recycle()
+            }
+
+            // Standard A4 (595 x 842 pt portrait, or 842 x 595 pt landscape)
+            val (ptW, ptH) = if (imgW > imgH) 842f to 595f else 595f to 842f
+
+            pdfWriter.addPage(jpegBytes, imgW, imgH, ptW, ptH)
+            writtenPages++
 
             onProgress?.invoke((index + 1).toFloat() / totalCount)
+        }
+
+        if (writtenPages == 0) {
+            throw IllegalStateException("Failed to decode any of the selected images")
         }
 
         pdfWriter.write()
@@ -80,7 +121,7 @@ object PdfProcessor {
 
         return@withContext PdfCompressionResult(
             outputPath = outputFile.absolutePath,
-            pageCount = totalCount,
+            pageCount = writtenPages,
             originalSizeBytes = totalOriginalBytes,
             compressedSizeBytes = outputFile.length()
         )
@@ -95,43 +136,20 @@ object PdfProcessor {
      * - highly: ~80-90% size reduction
      */
     suspend fun compressPdf(
-        context: Context,
         inputPath: String,
-        targetSizeBytes: Long = 0L,
         compressionLevel: String = "balanced", // "light", "balanced", "highly"
-        quality: Int = 0,
         cancellationToken: AtomicBoolean? = null,
         onProgress: ((progress: Float) -> Unit)? = null
     ): PdfCompressionResult = withContext(Dispatchers.IO) {
-        val inputFile = File(inputPath)
-        if (!inputFile.exists()) {
-            throw IllegalArgumentException("Input PDF file does not exist: $inputPath")
-        }
+        val inputFile = fileRepository.requireReadableInputFile(inputPath, "Input PDF file")
         val originalSizeBytes = inputFile.length()
 
-        val outputDir = File(context.cacheDir, "squishh_out").apply { mkdirs() }
-        val outputFile = File(outputDir, "squishh_slim_${System.currentTimeMillis()}_${UUID.randomUUID()}.pdf")
+        val outputFile = fileRepository.allocateOutputFile("squishh_slim", "pdf")
 
         val level = compressionLevel.lowercase()
-        val (renderScale, jpegQuality) = when {
-            level == "light" -> Pair(1.3f, 82)
-            level == "highly" -> Pair(0.8f, 38)
-            level == "balanced" -> Pair(1.0f, 62)
-            targetSizeBytes > 0L -> {
-                val ratio = targetSizeBytes.toFloat() / originalSizeBytes.toFloat()
-                when {
-                    ratio >= 0.7f -> Pair(1.3f, 82)
-                    ratio <= 0.25f -> Pair(0.8f, 38)
-                    else -> Pair(1.0f, 62)
-                }
-            }
-            quality in 10..95 -> {
-                when {
-                    quality >= 80 -> Pair(1.3f, quality)
-                    quality <= 40 -> Pair(0.8f, quality)
-                    else -> Pair(1.0f, quality)
-                }
-            }
+        val (renderScale, jpegQuality) = when (level) {
+            "light" -> Pair(1.3f, 82)
+            "highly" -> Pair(0.8f, 38)
             else -> Pair(1.0f, 62)
         }
 
@@ -148,8 +166,9 @@ object PdfProcessor {
                 val ptW = page.width.toFloat()
                 val ptH = page.height.toFloat()
 
-                val renderW = (ptW * renderScale).toInt().coerceAtLeast(300)
-                val renderH = (ptH * renderScale).toInt().coerceAtLeast(400)
+                val rawW = (ptW * renderScale).toInt().coerceAtLeast(1)
+                val rawH = (ptH * renderScale).toInt().coerceAtLeast(1)
+                val (renderW, renderH) = capDimensions(rawW, rawH, MAX_PDF_IMAGE_DIMENSION)
 
                 val bitmap = Bitmap.createBitmap(renderW, renderH, Bitmap.Config.ARGB_8888)
                 val canvas = Canvas(bitmap)
@@ -157,11 +176,13 @@ object PdfProcessor {
                 page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
                 page.close()
 
-                val stream = ByteArrayOutputStream()
-                bitmap.compress(Bitmap.CompressFormat.JPEG, jpegQuality, stream)
-                bitmap.recycle()
-
-                val jpegBytes = stream.toByteArray()
+                val jpegBytes = try {
+                    val stream = ByteArrayOutputStream()
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, jpegQuality, stream)
+                    stream.toByteArray()
+                } finally {
+                    bitmap.recycle()
+                }
                 pdfWriter.addPage(jpegBytes, renderW, renderH, ptW, ptH)
 
                 onProgress?.invoke((i + 1).toFloat() / pageCount)
@@ -192,18 +213,13 @@ object PdfProcessor {
      * Extracts all pages of a PDF document into high-resolution standalone images.
      */
     suspend fun pdfToImages(
-        context: Context,
         inputPath: String,
         targetFormat: String = "jpg",
         cancellationToken: AtomicBoolean? = null,
         onProgress: ((progress: Float) -> Unit)? = null
     ): PdfToImagesResult = withContext(Dispatchers.IO) {
-        val inputFile = File(inputPath)
-        if (!inputFile.exists()) {
-            throw IllegalArgumentException("Input PDF file does not exist: $inputPath")
-        }
+        val inputFile = fileRepository.requireReadableInputFile(inputPath, "Input PDF file")
 
-        val outputDir = File(context.cacheDir, "squishh_out").apply { mkdirs() }
         val pfd = ParcelFileDescriptor.open(inputFile, ParcelFileDescriptor.MODE_READ_ONLY)
         val renderer = PdfRenderer(pfd)
         val pageCount = renderer.pageCount
@@ -218,18 +234,22 @@ object PdfProcessor {
                 if (cancellationToken?.get() == true) throw InterruptedException("PDF extraction cancelled")
 
                 val page = renderer.openPage(i)
-                val width = (page.width * 2f).toInt()
-                val height = (page.height * 2f).toInt()
+                val rawW = (page.width * 2f).toInt().coerceAtLeast(1)
+                val rawH = (page.height * 2f).toInt().coerceAtLeast(1)
+                val (width, height) = capDimensions(rawW, rawH, MAX_PDF_IMAGE_DIMENSION)
 
                 val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
                 page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                 page.close()
 
-                val pageFile = File(outputDir, "squishh_page_${i + 1}_${System.currentTimeMillis()}.$ext")
-                FileOutputStream(pageFile).use { out ->
-                    bitmap.compress(compressFormat, 90, out)
+                val pageFile = fileRepository.allocateOutputFile("squishh_page_${i + 1}", ext)
+                try {
+                    FileOutputStream(pageFile).use { out ->
+                        bitmap.compress(compressFormat, 90, out)
+                    }
+                } finally {
+                    bitmap.recycle()
                 }
-                bitmap.recycle()
 
                 outputPaths.add(pageFile.absolutePath)
                 totalBytes += pageFile.length()
@@ -283,8 +303,9 @@ private class JpegPdfWriter(private val outputFile: File) {
                 writeBytes(str.toByteArray(Charsets.US_ASCII))
             }
 
-            // PDF 1.4 Header with binary comment
-            writeString("%PDF-1.4\n%\u00E2\u00E3\u00CF\u00D3\n")
+            // PDF 1.4 Header with binary comment (non-ASCII bytes >= 128)
+            writeString("%PDF-1.4\n%")
+            writeBytes(byteArrayOf(0xE2.toByte(), 0xE3.toByte(), 0xCF.toByte(), 0xD3.toByte(), '\n'.code.toByte()))
 
             val count = pages.size
             val pageObjIds = (0 until count).map { 3 + it * 3 }
@@ -314,8 +335,25 @@ private class JpegPdfWriter(private val outputFile: File) {
                     "/Contents $contentObjId 0 R >>\nendobj\n"
                 )
 
-                // Content stream (scales image to cover page points)
-                val contentStream = "q\n${page.pageWidthPt} 0 0 ${page.pageHeightPt} 0 0 cm\n/Im1 Do\nQ\n"
+                // Content stream (scales image proportionally centered inside page MediaBox)
+                val imgAspect = if (page.pixelWidth > 0 && page.pixelHeight > 0) {
+                    page.pixelWidth.toFloat() / page.pixelHeight.toFloat()
+                } else {
+                    page.pageWidthPt / page.pageHeightPt
+                }
+                val pageAspect = page.pageWidthPt / page.pageHeightPt
+                val (drawW, drawH) = if (imgAspect > pageAspect) {
+                    page.pageWidthPt to (page.pageWidthPt / imgAspect)
+                } else {
+                    (page.pageHeightPt * imgAspect) to page.pageHeightPt
+                }
+                val offsetX = (page.pageWidthPt - drawW) / 2f
+                val offsetY = (page.pageHeightPt - drawH) / 2f
+                val contentStream = String.format(
+                    java.util.Locale.US,
+                    "q\n%.2f 0 0 %.2f %.2f %.2f cm\n/Im1 Do\nQ\n",
+                    drawW, drawH, offsetX, offsetY
+                )
                 val contentStreamBytes = contentStream.toByteArray(Charsets.US_ASCII)
                 offsets.add(bytesWritten)
                 writeString(

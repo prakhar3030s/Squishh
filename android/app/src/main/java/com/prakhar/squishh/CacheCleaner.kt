@@ -2,10 +2,68 @@ package com.prakhar.squishh
 
 import android.content.Context
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.io.File
 
 object CacheCleaner {
     private const val TAG = "SquishhCacheCleaner"
+    private val cleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val cleanupMutex = Mutex()
+    @Volatile
+    private var startupCleanupJob: Job? = null
+
+    /**
+     * Dispatches a cache wipe onto Dispatchers.IO off the main thread.
+     */
+    fun clearAllCacheAsync(context: Context, isStartup: Boolean = false): Job {
+        val appContext = context.applicationContext
+        val job = cleanupScope.launch {
+            cleanupMutex.withLock {
+                clearAllCache(appContext)
+            }
+        }
+        if (isStartup) {
+            startupCleanupJob = job
+        }
+        return job
+    }
+
+    /**
+     * Suspends until any startup cache cleanup has completed to avoid deleting newly resolved files.
+     */
+    suspend fun awaitPendingCleanup() {
+        startupCleanupJob?.join()
+    }
+
+    /**
+     * Runs [clearAllCache] on Dispatchers.IO guarded by [cleanupMutex].
+     */
+    suspend fun clearAllCacheSuspended(context: Context) {
+        val appContext = context.applicationContext
+        withContext(Dispatchers.IO) {
+            cleanupMutex.withLock {
+                clearAllCache(appContext)
+            }
+        }
+    }
+
+    /**
+     * Runs an arbitrary lightweight cleanup block (e.g. input cache trim) on Dispatchers.IO.
+     */
+    fun runBackgroundCleanup(block: () -> Unit): Job {
+        return cleanupScope.launch {
+            cleanupMutex.withLock {
+                block()
+            }
+        }
+    }
 
     /**
      * Wipes all application cache files instantly:

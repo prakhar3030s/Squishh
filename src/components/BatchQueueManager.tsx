@@ -1,13 +1,11 @@
 import { formatBytes } from '../services/engineManager';
-import { haptics } from '../services/haptics';
-import { SquishhButton } from './ui/SquishhButton';
+import { useHaptics } from '../services/ServiceContext';
 import {
   Layers,
   CheckCircle2,
   Clock,
   AlertCircle,
   X,
-  Download,
   Trash2,
   ChevronDown,
   ChevronUp
@@ -18,15 +16,13 @@ export interface BatchQueueItem {
   name: string;
   sizeBytes: number;
   progress: number;
-  status: 'waiting' | 'processing' | 'completed' | 'failed';
-  outputPath?: string;
+  status: 'waiting' | 'processing' | 'completed' | 'failed' | 'cancelled';
   error?: string;
 }
 
 interface BatchQueueManagerProps {
   items: BatchQueueItem[];
   onCancelItem?: (id: string) => void;
-  onSaveAll?: () => void;
   onClearCompleted?: () => void;
   isExpanded: boolean;
   onToggleExpand: () => void;
@@ -35,35 +31,59 @@ interface BatchQueueManagerProps {
 export function BatchQueueManager({
   items,
   onCancelItem,
-  onSaveAll,
   onClearCompleted,
   isExpanded,
   onToggleExpand,
 }: BatchQueueManagerProps) {
+  const haptics = useHaptics();
   if (items.length === 0) return null;
 
   const completedCount = items.filter((it) => it.status === 'completed').length;
   const processingCount = items.filter((it) => it.status === 'processing').length;
-  const overallProgress = items.length > 0
-    ? Math.round(
-        (items.reduce((acc, it) => acc + (it.status === 'completed' ? 100 : it.progress), 0) /
-          (items.length * 100)) *
-          100
-      )
-    : 0;
+
+  /*
+   * Overall progress formula across all 5 BatchQueueItem statuses (QUAL-008):
+   * - Exclude aborted terminal statuses ('failed', 'cancelled') from the denominator so
+   *   cancelling or failing part of a batch never traps overallProgress permanently below 100%
+   *   once remaining work finishes.
+   * - If every item failed or was cancelled (trackableItems.length === 0), report 0%.
+   * - For remaining trackable items:
+   *   - 'completed'  -> 100
+   *   - 'waiting'    -> 0
+   *   - 'processing' -> clamp(it.progress, 0, 100)
+   */
+  const trackableItems = items.filter(
+    (it) => it.status !== 'failed' && it.status !== 'cancelled'
+  );
+  const overallProgress =
+    trackableItems.length > 0
+      ? Math.round(
+          trackableItems.reduce((acc, it) => {
+            if (it.status === 'completed') return acc + 100;
+            if (it.status === 'waiting') return acc;
+            return acc + Math.max(0, Math.min(100, it.progress));
+          }, 0) / trackableItems.length
+        )
+      : 0;
 
   return (
-    <div className="w-full max-w-md mx-auto my-2 rounded-3xl bg-[#FBF9F5] dark:bg-[#141618] border border-[#E5DFD5] dark:border-[#2D3238] shadow-sm overflow-hidden text-left transition-all">
+    <div className="w-full mx-auto my-2 rounded-3xl bg-[#FBF9F5] dark:bg-[#141618] border border-[#E5DFD5] dark:border-[#2D3238] shadow-sm overflow-hidden text-left transition-all">
       {/* Collapsed Header Pill */}
-      <div
+      <button
+        type="button"
+        aria-expanded={isExpanded}
+        aria-label={`Batch queue, ${completedCount} of ${items.length} completed, ${overallProgress}%`}
         onClick={() => {
           haptics.selection();
           onToggleExpand();
         }}
-        className="p-3.5 flex items-center justify-between cursor-pointer hover:bg-[#EDE8E0]/40 dark:hover:bg-[#24282D]/40 transition-colors"
+        className="w-full p-3.5 flex items-center justify-between cursor-pointer hover:bg-[#EDE8E0]/40 dark:hover:bg-[#24282D]/40 transition-colors text-left"
       >
         <div className="flex items-center gap-2.5 min-w-0">
-          <div className="w-8 h-8 rounded-xl bg-[#4A6B53]/15 dark:bg-[#76A183]/20 text-[#4A6B53] dark:text-[#76A183] flex items-center justify-center flex-shrink-0">
+          <div
+            aria-hidden="true"
+            className="w-8 h-8 rounded-xl bg-[#4A6B53]/15 dark:bg-[#76A183]/20 text-[#4A6B53] dark:text-[#76A183] flex items-center justify-center flex-shrink-0"
+          >
             <Layers className="w-4 h-4" />
           </div>
           <div className="min-w-0">
@@ -82,18 +102,25 @@ export function BatchQueueManager({
         <div className="flex items-center gap-3">
           <span className="font-mono text-xs font-semibold">{overallProgress}%</span>
           {isExpanded ? (
-            <ChevronUp className="w-4 h-4 text-[#767B77]" />
+            <ChevronUp className="w-4 h-4 text-[#767B77]" aria-hidden="true" />
           ) : (
-            <ChevronDown className="w-4 h-4 text-[#767B77]" />
+            <ChevronDown className="w-4 h-4 text-[#767B77]" aria-hidden="true" />
           )}
         </div>
-      </div>
+      </button>
 
       {/* Expanded Queue Drawer */}
       {isExpanded && (
         <div className="p-3.5 pt-0 border-t border-[#E5DFD5] dark:border-[#2D3238] flex flex-col gap-2">
           {/* Progress bar */}
-          <div className="w-full bg-[#EDE8E0] dark:bg-[#24282D] h-1.5 rounded-full overflow-hidden mt-3 mb-1">
+          <div
+            role="progressbar"
+            aria-valuenow={overallProgress}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-label="Overall batch queue progress"
+            className="w-full bg-[#EDE8E0] dark:bg-[#24282D] h-1.5 rounded-full overflow-hidden mt-3 mb-1"
+          >
             <div
               className="bg-[#4A6B53] dark:bg-[#76A183] h-full transition-all duration-300 rounded-full"
               style={{ width: `${overallProgress}%` }}
@@ -109,16 +136,16 @@ export function BatchQueueManager({
               >
                 <div className="flex items-center gap-2 min-w-0 flex-1">
                   {item.status === 'completed' && (
-                    <CheckCircle2 className="w-4 h-4 text-[#4A6B53] dark:text-[#76A183] flex-shrink-0" />
+                    <CheckCircle2 className="w-4 h-4 text-[#4A6B53] dark:text-[#76A183] flex-shrink-0" aria-hidden="true" />
                   )}
                   {item.status === 'processing' && (
-                    <div className="w-4 h-4 rounded-full border-2 border-[#4A6B53] dark:border-[#76A183] border-t-transparent animate-spin flex-shrink-0" />
+                    <div aria-hidden="true" className="w-4 h-4 rounded-full border-2 border-[#4A6B53] dark:border-[#76A183] border-t-transparent animate-spin flex-shrink-0" />
                   )}
                   {item.status === 'waiting' && (
-                    <Clock className="w-4 h-4 text-[#767B77] flex-shrink-0" />
+                    <Clock className="w-4 h-4 text-[#767B77] flex-shrink-0" aria-hidden="true" />
                   )}
-                  {item.status === 'failed' && (
-                    <AlertCircle className="w-4 h-4 text-red-500 flex-shrink-0" />
+                  {(item.status === 'failed' || item.status === 'cancelled') && (
+                    <AlertCircle className="w-4 h-4 text-red-500 flex-shrink-0" aria-hidden="true" />
                   )}
 
                   <div className="min-w-0 flex-1">
@@ -132,16 +159,18 @@ export function BatchQueueManager({
                   </div>
                 </div>
 
-                {item.status !== 'completed' && onCancelItem && (
+                {(item.status === 'waiting' || item.status === 'processing') && onCancelItem && (
                   <button
+                    type="button"
                     onClick={() => {
                       haptics.selection();
                       onCancelItem(item.id);
                     }}
-                    className="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-[#767B77]"
+                    className="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-[#767B77] cursor-pointer"
+                    aria-label={`Cancel ${item.name}`}
                     title="Cancel"
                   >
-                    <X className="w-3.5 h-3.5" />
+                    <X className="w-3.5 h-3.5" aria-hidden="true" />
                   </button>
                 )}
               </div>
@@ -150,30 +179,17 @@ export function BatchQueueManager({
 
           {/* Queue Actions */}
           <div className="flex items-center gap-2 mt-2 pt-2 border-t border-[#E5DFD5] dark:border-[#2D3238]">
-            {completedCount > 0 && onSaveAll && (
-              <SquishhButton
-                size="sm"
-                variant="primary"
-                onClick={() => {
-                  haptics.mediumImpact();
-                  onSaveAll();
-                }}
-                icon={<Download className="w-3.5 h-3.5" />}
-                className="flex-1"
-              >
-                save all ({completedCount})
-              </SquishhButton>
-            )}
-
             {onClearCompleted && (
               <button
+                type="button"
                 onClick={() => {
                   haptics.selection();
                   onClearCompleted();
                 }}
-                className="px-3 py-2 text-xs font-semibold rounded-xl text-[#767B77] hover:text-[#2C302E] dark:hover:text-[#EDE9E3] flex items-center gap-1.5"
+                aria-label="Clear completed batch items"
+                className="px-3 py-2 text-xs font-semibold rounded-xl text-[#767B77] hover:text-[#2C302E] dark:hover:text-[#EDE9E3] flex items-center gap-1.5 cursor-pointer"
               >
-                <Trash2 className="w-3.5 h-3.5" />
+                <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
                 <span>clear</span>
               </button>
             )}

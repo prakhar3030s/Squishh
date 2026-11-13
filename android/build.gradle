@@ -8,7 +8,6 @@ buildscript {
     }
     dependencies {
         classpath 'com.android.tools.build:gradle:8.13.0'
-        classpath 'com.google.gms:google-services:4.4.4'
         classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:2.1.10'
 
         // NOTE: Do not place your application dependencies here; they belong
@@ -22,6 +21,17 @@ allprojects {
     repositories {
         google()
         mavenCentral()
+    }
+}
+
+subprojects { subproject ->
+    subproject.plugins.withType(org.gradle.api.plugins.JavaBasePlugin).configureEach {
+        def javaToolchains = subproject.extensions.getByType(org.gradle.jvm.toolchain.JavaToolchainService)
+        subproject.tasks.withType(JavaCompile).configureEach {
+            javaCompiler.set(javaToolchains.compilerFor {
+                languageVersion = org.gradle.jvm.toolchain.JavaLanguageVersion.of(21)
+            })
+        }
     }
 }
 

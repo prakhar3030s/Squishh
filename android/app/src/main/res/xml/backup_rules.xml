@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <exclude domain="root" path="cache" />
+    <exclude domain="root" path="code_cache" />
+    <exclude domain="file" path="." />
+    <exclude domain="external" path="." />
+    <exclude domain="sharedpref" path="." />
+    <exclude domain="database" path="." />
+</full-backup-content>

@@ -9,9 +9,12 @@ import '@fontsource/jetbrains-mono/400.css';
 import '@fontsource/jetbrains-mono/500.css';
 import './index.css';
 import App from './App';
+import { SquishhServicesProvider } from './services/ServiceContext';
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
-    <App />
+    <SquishhServicesProvider>
+      <App />
+    </SquishhServicesProvider>
   </React.StrictMode>
 );

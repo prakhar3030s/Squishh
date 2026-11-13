@@ -3,17 +3,10 @@ package com.prakhar.squishh
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.webkit.MimeTypeMap
 import java.io.File
 import java.io.FileOutputStream
-import java.io.InputStream
 import java.util.UUID
-
-data class ResolvedFileInfo(
-    val localPath: String,
-    val displayName: String,
-    val sizeBytes: Long,
-    val mimeType: String
-)
 
 object StorageResolver {
 
@@ -26,7 +19,7 @@ object StorageResolver {
                     localPath = f.absolutePath,
                     displayName = f.name,
                     sizeBytes = f.length(),
-                    mimeType = "application/octet-stream"
+                    mimeType = detectMimeTypeFromName(f.name)
                 )
             }
         }
@@ -39,7 +32,7 @@ object StorageResolver {
                         localPath = f.absolutePath,
                         displayName = f.name,
                         sizeBytes = f.length(),
-                        mimeType = "application/octet-stream"
+                        mimeType = detectMimeTypeFromName(f.name)
                     )
                 }
             }
@@ -70,7 +63,12 @@ object StorageResolver {
             uri.lastPathSegment?.let { displayName = it }
         }
 
-        val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
+        val resolvedMime = contentResolver.getType(uri)
+        val mimeType = if (!resolvedMime.isNullOrBlank() && resolvedMime != "application/octet-stream") {
+            resolvedMime
+        } else {
+            detectMimeTypeFromName(displayName)
+        }
 
         // Stream into internal sandbox cache directory without loading entire file to memory
         val inputDir = File(context.cacheDir, "squishh_in").apply { mkdirs() }
@@ -99,6 +97,33 @@ object StorageResolver {
             sizeBytes = sizeBytes,
             mimeType = mimeType
         )
+    }
+
+    fun detectMimeTypeFromName(fileName: String): String {
+        val ext = fileName.substringAfterLast('.', "").lowercase()
+        if (ext.isEmpty()) return "application/octet-stream"
+        return when (ext) {
+            "jpg", "jpeg" -> "image/jpeg"
+            "png" -> "image/png"
+            "webp" -> "image/webp"
+            "heic" -> "image/heic"
+            "heif" -> "image/heif"
+            "avif" -> "image/avif"
+            "gif" -> "image/gif"
+            "mp4" -> "video/mp4"
+            "mov" -> "video/quicktime"
+            "mkv" -> "video/x-matroska"
+            "webm" -> "video/webm"
+            "mp3" -> "audio/mpeg"
+            "m4a" -> "audio/mp4"
+            "aac" -> "audio/aac"
+            "wav" -> "audio/wav"
+            "ogg" -> "audio/ogg"
+            "flac" -> "audio/flac"
+            "opus" -> "audio/opus"
+            "pdf" -> "application/pdf"
+            else -> MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
+        }
     }
 
     fun cleanInputCache(context: Context) {

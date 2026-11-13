@@ -35,35 +35,48 @@ android {
         abi {
             enable true
             reset()
-            include 'arm64-v8a'
+            // Cover 64-bit ARM, 32-bit ARM devices, and x86_64 emulators/Chromebooks plus universal fallback APK
+            include 'armeabi-v7a', 'arm64-v8a', 'x86_64'
             universalApk true
         }
     }
 
+    def keystoreFile = rootProject.file('keystore.properties')
+    def keystoreProps = new Properties()
+    if (keystoreFile.exists()) {
+        keystoreFile.withInputStream { keystoreProps.load(it) }
+    }
+    def hasReleaseSigning = keystoreFile.exists() &&
+        !keystoreProps.getProperty('storeFile', '').trim().isEmpty() &&
+        !keystoreProps.getProperty('storePassword', '').trim().isEmpty() &&
+        !keystoreProps.getProperty('keyAlias', '').trim().isEmpty() &&
+        !keystoreProps.getProperty('keyPassword', '').trim().isEmpty()
+
     signingConfigs {
         release {
-            def keystoreFile = rootProject.file('keystore.properties')
-            if (keystoreFile.exists()) {
-                def props = new Properties()
-                props.load(new FileInputStream(keystoreFile))
-                storeFile file(props['storeFile'])
-                storePassword props['storePassword']
-                keyAlias props['keyAlias']
-                keyPassword props['keyPassword']
+            if (hasReleaseSigning) {
+                storeFile rootProject.file(keystoreProps.getProperty('storeFile').trim())
+                storePassword keystoreProps.getProperty('storePassword').trim()
+                keyAlias keystoreProps.getProperty('keyAlias').trim()
+                keyPassword keystoreProps.getProperty('keyPassword').trim()
             }
         }
     }
 
     buildTypes {
         release {
-            minifyEnabled false
-            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-            def keystoreFile = rootProject.file('keystore.properties')
-            if (keystoreFile.exists()) {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (hasReleaseSigning) {
                 signingConfig signingConfigs.release
             }
         }
     }
+}
+
+kotlin {
+    jvmToolchain(21)
 }
 
 repositories {
@@ -84,6 +97,9 @@ dependencies {
     // Kotlin Coroutines for async native background processing
     implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0"
 
+    // Lightweight DI container (Koin)
+    implementation "io.insert-koin:koin-android:4.0.2"
+
     // Jetpack Media3 for hardware-accelerated video transcoding
     def media3Version = "1.5.1"
     implementation "androidx.media3:media3-transformer:$media3Version"
@@ -92,12 +108,3 @@ dependencies {
 }
 
 apply from: 'capacitor.build.gradle'
-
-try {
-    def servicesJSON = file('google-services.json')
-    if (servicesJSON.text) {
-        apply plugin: 'com.google.gms.google-services'
-    }
-} catch(Exception e) {
-    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
-}

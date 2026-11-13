@@ -1,5 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- Dev-only network use for Vite livereload / local testing -->
-    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Offline-only debug manifest: livereload URL is not configured in capacitor.config.ts -->
 </manifest>

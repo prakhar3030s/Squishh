@@ -4,14 +4,11 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.net.Uri
-import android.os.Handler
-import android.os.Looper
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.effect.ScaleAndRotateTransformation
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.DefaultEncoderFactory
-import androidx.media3.transformer.DefaultMuxer
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.Effects
 import androidx.media3.transformer.ExportException
@@ -22,30 +19,73 @@ import androidx.media3.transformer.VideoEncoderSettings
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.OutputStream
-import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
-data class VideoCompressionResult(
-    val outputPath: String,
-    val originalSizeBytes: Long,
-    val compressedSizeBytes: Long,
-    val durationMs: Long,
-    val width: Int,
-    val height: Int,
-    val isGif: Boolean
-)
+class VideoProcessor(
+    private val context: Context,
+    private val fileRepository: FileRepository
+) {
 
-object VideoProcessor {
+    companion object {
+        const val LIGHT_SIZE_RATIO = 0.75f
+        const val BALANCED_SIZE_RATIO = 0.50f
+        const val HIGH_SIZE_RATIO = 0.22f
+        const val DEFAULT_ESTIMATE_SIZE_RATIO = 0.60f
+
+        private const val MIN_SOURCE_BITRATE_BPS = 300_000
+        private const val MAX_SOURCE_BITRATE_BPS = 50_000_000
+
+        private const val LIGHT_OVERHEAD_FACTOR = 0.92f
+        private const val BALANCED_OVERHEAD_FACTOR = 0.90f
+        private const val HIGH_OVERHEAD_FACTOR = 0.88f
+
+        private const val LIGHT_AUDIO_BITRATE_BPS = 128_000
+        private const val BALANCED_AUDIO_BITRATE_BPS = 96_000
+        private const val HIGH_AUDIO_BITRATE_BPS = 64_000
+
+        private const val MIN_LIGHT_VIDEO_BITRATE_BPS = 350_000
+        private const val MIN_BALANCED_VIDEO_BITRATE_BPS = 250_000
+        private const val MIN_HIGH_VIDEO_BITRATE_BPS = 180_000
+        private const val HIGH_LOW_BITRATE_THRESHOLD_BPS = 320_000
+
+        private const val RESOLUTION_ORIG_BITRATE_CAP_RATIO = 0.75f
+        private const val HIGH_CAP_BITRATE_RATIO = 0.25f
+        private const val HIGH_FPS_THRESHOLD = 50
+        private const val HIGH_COMPRESSION_FPS_CAP = 30
+
+        // Ordered bitrate tiers matching UI resolutions: 360p, 480p, 720p, and >720p.
+        private data class BitrateTier(val maxHeight: Int, val standardFpsBps: Int, val highFpsBps: Int)
+
+        private val RESOLUTION_BITRATE_SCALES = arrayOf(
+            BitrateTier(maxHeight = 360, standardFpsBps = 450_000, highFpsBps = 650_000),
+            BitrateTier(maxHeight = 480, standardFpsBps = 700_000, highFpsBps = 950_000),
+            BitrateTier(maxHeight = 720, standardFpsBps = 1_400_000, highFpsBps = 2_000_000),
+            BitrateTier(maxHeight = Int.MAX_VALUE, standardFpsBps = 2_400_000, highFpsBps = 3_500_000)
+        )
+
+        private const val GIF_MAX_DURATION_MS = 10_000L
+        private const val GIF_DEFAULT_DURATION_MS = 5_000L
+        private const val GIF_FRAME_RATE = 10
+        private const val GIF_MIN_FRAMES = 5
+        private const val GIF_MAX_FRAMES = 60
+        private const val GIF_TARGET_WIDTH_PX = 360
+
+        fun estimatedSizeRatio(compressionLevel: String): Float = when (compressionLevel) {
+            "light" -> LIGHT_SIZE_RATIO
+            "balanced" -> BALANCED_SIZE_RATIO
+            "high" -> HIGH_SIZE_RATIO
+            else -> DEFAULT_ESTIMATE_SIZE_RATIO
+        }
+    }
 
     suspend fun process(
-        context: Context,
         inputPath: String,
         compressionLevel: String = "", // "light", "balanced", "high"
-        targetSizeBytes: Long = 0L,
         resolution: String = "original", // "original", "1080p", "720p", "480p"
         fpsLimit: Int = 0,
         muteAudio: Boolean = false,
@@ -53,10 +93,7 @@ object VideoProcessor {
         cancellationToken: AtomicBoolean? = null,
         onProgress: ((progress: Float, etaRemainingMs: Long) -> Unit)? = null
     ): VideoCompressionResult = withContext(Dispatchers.IO) {
-        val inputFile = File(inputPath)
-        if (!inputFile.exists()) {
-            throw IllegalArgumentException("Input video file does not exist: $inputPath")
-        }
+        val inputFile = fileRepository.requireReadableInputFile(inputPath, "Input video file")
         val originalSizeBytes = inputFile.length()
 
         // Extract metadata using MediaMetadataRetriever
@@ -75,12 +112,10 @@ object VideoProcessor {
             try { retriever.release() } catch (_: Exception) {}
         }
 
-        val outputDir = File(context.cacheDir, "squishh_out").apply { mkdirs() }
-
         // Branch 1: Video to Animated GIF
         if (asGif) {
-            val gifFile = File(outputDir, "squishh_anim_${System.currentTimeMillis()}_${UUID.randomUUID()}.gif")
-            extractAndEncodeGif(
+            val gifFile = fileRepository.allocateOutputFile("squishh_anim", "gif")
+            val (gifWidth, gifHeight) = extractAndEncodeGif(
                 inputFile = inputFile,
                 outputFile = gifFile,
                 durationMs = durationMs,
@@ -92,50 +127,53 @@ object VideoProcessor {
                 originalSizeBytes = originalSizeBytes,
                 compressedSizeBytes = gifFile.length(),
                 durationMs = durationMs,
-                width = 480,
-                height = (480f * (origHeight.toFloat() / origWidth)).toInt(),
+                width = gifWidth,
+                height = gifHeight,
                 isGif = true
             )
         }
 
         // Branch 2: Hardware Accelerated Video Transcoding via Media3 Transformer
-        val outputFile = File(outputDir, "squishh_video_${System.currentTimeMillis()}_${UUID.randomUUID()}.mp4")
+        val outputFile = fileRepository.allocateOutputFile("squishh_video", "mp4")
         val deferred = CompletableDeferred<ExportResult>()
 
         val durationSec = (durationMs / 1000f).coerceAtLeast(1.0f)
-        val origBitrate = ((originalSizeBytes * 8L) / durationSec).toInt().coerceIn(300_000, 50_000_000)
+        val origBitrate = ((originalSizeBytes * 8L) / durationSec).toInt()
+            .coerceIn(MIN_SOURCE_BITRATE_BPS, MAX_SOURCE_BITRATE_BPS)
 
         // Effective Target Size Cap: In Squishh, compression must never make the file larger!
         val effectiveTargetBytes = when {
-            compressionLevel == "light" -> (originalSizeBytes * 0.75f).toLong()
-            compressionLevel == "balanced" -> (originalSizeBytes * 0.50f).toLong()
-            compressionLevel == "high" -> (originalSizeBytes * 0.22f).toLong()
-            targetSizeBytes > 0L -> minOf(targetSizeBytes, (originalSizeBytes * 0.90).toLong())
+            compressionLevel == "light" -> (originalSizeBytes * LIGHT_SIZE_RATIO).toLong()
+            compressionLevel == "balanced" -> (originalSizeBytes * BALANCED_SIZE_RATIO).toLong()
+            compressionLevel == "high" -> (originalSizeBytes * HIGH_SIZE_RATIO).toLong()
             else -> 0L
         }
 
         // Calculate target video bitrate
         val videoBitrate = when {
             compressionLevel == "light" -> {
-                val audioBitrate = if (muteAudio) 0 else 128_000
-                val targetTotalBitrate = ((effectiveTargetBytes * 0.92f * 8L) / durationSec).toInt()
-                (targetTotalBitrate - audioBitrate).coerceIn(350_000, (origBitrate * 0.75f).toInt().coerceAtLeast(350_000))
+                val audioBitrate = if (muteAudio) 0 else LIGHT_AUDIO_BITRATE_BPS
+                val targetTotalBitrate = ((effectiveTargetBytes * LIGHT_OVERHEAD_FACTOR * 8L) / durationSec).toInt()
+                (targetTotalBitrate - audioBitrate).coerceIn(
+                    MIN_LIGHT_VIDEO_BITRATE_BPS,
+                    (origBitrate * LIGHT_SIZE_RATIO).toInt().coerceAtLeast(MIN_LIGHT_VIDEO_BITRATE_BPS)
+                )
             }
             compressionLevel == "balanced" -> {
-                val audioBitrate = if (muteAudio) 0 else 96_000
-                val targetTotalBitrate = ((effectiveTargetBytes * 0.90f * 8L) / durationSec).toInt()
-                (targetTotalBitrate - audioBitrate).coerceIn(250_000, (origBitrate * 0.50f).toInt().coerceAtLeast(250_000))
+                val audioBitrate = if (muteAudio) 0 else BALANCED_AUDIO_BITRATE_BPS
+                val targetTotalBitrate = ((effectiveTargetBytes * BALANCED_OVERHEAD_FACTOR * 8L) / durationSec).toInt()
+                (targetTotalBitrate - audioBitrate).coerceIn(
+                    MIN_BALANCED_VIDEO_BITRATE_BPS,
+                    (origBitrate * BALANCED_SIZE_RATIO).toInt().coerceAtLeast(MIN_BALANCED_VIDEO_BITRATE_BPS)
+                )
             }
             compressionLevel == "high" -> {
-                val audioBitrate = if (muteAudio) 0 else 64_000
-                val targetTotalBitrate = ((effectiveTargetBytes * 0.88f * 8L) / durationSec).toInt()
-                (targetTotalBitrate - audioBitrate).coerceIn(180_000, (origBitrate * 0.25f).toInt().coerceAtLeast(180_000))
-            }
-            effectiveTargetBytes > 0L -> {
-                val audioBitrate = if (muteAudio) 0 else 96_000
-                val safeTargetBytes = (effectiveTargetBytes * 0.90f).toLong()
-                val targetTotalBitrate = ((safeTargetBytes * 8L) / durationSec).toInt()
-                (targetTotalBitrate - audioBitrate).coerceIn(150_000, (origBitrate * 0.85f).toInt().coerceAtLeast(300_000))
+                val audioBitrate = if (muteAudio) 0 else HIGH_AUDIO_BITRATE_BPS
+                val targetTotalBitrate = ((effectiveTargetBytes * HIGH_OVERHEAD_FACTOR * 8L) / durationSec).toInt()
+                (targetTotalBitrate - audioBitrate).coerceIn(
+                    MIN_HIGH_VIDEO_BITRATE_BPS,
+                    (origBitrate * HIGH_CAP_BITRATE_RATIO).toInt().coerceAtLeast(MIN_HIGH_VIDEO_BITRATE_BPS)
+                )
             }
             else -> {
                 val targetNominalHeight = when (resolution) {
@@ -146,17 +184,16 @@ object VideoProcessor {
                     else -> origHeight
                 }
                 val effectiveH = minOf(origHeight, targetNominalHeight)
-                val nominalBitrate = when {
-                    effectiveH <= 360 -> if (fpsLimit >= 50) 650_000 else 450_000
-                    effectiveH <= 480 -> if (fpsLimit >= 50) 950_000 else 700_000
-                    effectiveH <= 720 -> if (fpsLimit >= 50) 2_000_000 else 1_400_000
-                    else -> if (fpsLimit >= 50) 3_500_000 else 2_400_000
-                }
-                minOf(nominalBitrate, (origBitrate * 0.75f).toInt().coerceAtLeast(250_000))
+                val tier = RESOLUTION_BITRATE_SCALES.first { effectiveH <= it.maxHeight }
+                val nominalBitrate = if (fpsLimit >= HIGH_FPS_THRESHOLD) tier.highFpsBps else tier.standardFpsBps
+                minOf(
+                    nominalBitrate,
+                    (origBitrate * RESOLUTION_ORIG_BITRATE_CAP_RATIO).toInt().coerceAtLeast(MIN_BALANCED_VIDEO_BITRATE_BPS)
+                )
             }
         }
 
-        android.util.Log.i("VideoProcessor", "Starting transcode: level=$compressionLevel, duration=${durationSec}s, origBitrate=$origBitrate, targetBytes=$targetSizeBytes, effectiveTargetBytes=$effectiveTargetBytes, videoBitrate=$videoBitrate")
+        android.util.Log.i("VideoProcessor", "Starting transcode: level=$compressionLevel, duration=${durationSec}s, origBitrate=$origBitrate, effectiveTargetBytes=$effectiveTargetBytes, videoBitrate=$videoBitrate")
 
         // Target resolution dimension calculation and frame rate control
         val effectsList = mutableListOf<androidx.media3.common.Effect>()
@@ -169,15 +206,7 @@ object VideoProcessor {
                 if (isPortrait) 1280 else 720
             }
             compressionLevel == "high" -> {
-                if (videoBitrate < 320_000) (if (isPortrait) 640 else 360) else (if (isPortrait) 854 else 480)
-            }
-            effectiveTargetBytes > 0L -> {
-                when {
-                    videoBitrate < 380_000 -> if (isPortrait) 640 else 360
-                    videoBitrate < 900_000 -> if (isPortrait) 854 else 480
-                    videoBitrate < 2_000_000 -> if (isPortrait) 1280 else 720
-                    else -> if (isPortrait) 1920 else 1080
-                }
+                if (videoBitrate < HIGH_LOW_BITRATE_THRESHOLD_BPS) (if (isPortrait) 640 else 360) else (if (isPortrait) 854 else 480)
             }
             resolution == "360p" -> if (isPortrait) 640 else 360
             resolution == "480p" -> if (isPortrait) 854 else 480
@@ -188,7 +217,7 @@ object VideoProcessor {
 
         val effectiveFpsLimit = when {
             fpsLimit > 0 -> fpsLimit
-            compressionLevel == "high" -> 30
+            compressionLevel == "high" -> HIGH_COMPRESSION_FPS_CAP
             else -> 0
         }
 
@@ -274,8 +303,28 @@ object VideoProcessor {
         deferred.await()
 
         // Anti-ballooning guard: ensure output is never larger than the original
-        if (outputFile.exists() && outputFile.length() >= originalSizeBytes && inputFile.extension.equals("mp4", ignoreCase = true)) {
-            inputFile.copyTo(outputFile, overwrite = true)
+        if (outputFile.exists() && outputFile.length() >= originalSizeBytes) {
+            if (inputFile.extension.equals("mp4", ignoreCase = true)) {
+                // Same container: copy the original over the larger output.
+                inputFile.copyTo(outputFile, overwrite = true)
+            } else {
+                // Different container: the transcode did not reduce size, so keep the
+                // original file (in its own format) instead of returning a larger MP4.
+                val originalExt = inputFile.extension.ifEmpty { "mp4" }
+                val fallbackFile = fileRepository.allocateOutputFile("squishh_video", originalExt)
+                inputFile.copyTo(fallbackFile, overwrite = true)
+                outputFile.delete()
+                onProgress?.invoke(1.0f, 0L)
+                return@withContext VideoCompressionResult(
+                    outputPath = fallbackFile.absolutePath,
+                    originalSizeBytes = originalSizeBytes,
+                    compressedSizeBytes = fallbackFile.length(),
+                    durationMs = durationMs,
+                    width = origWidth,
+                    height = origHeight,
+                    isGif = false
+                )
+            }
         }
 
         onProgress?.invoke(1.0f, 0L)
@@ -294,63 +343,92 @@ object VideoProcessor {
     /**
      * Samples frames from video and writes an optimized animated GIF.
      */
+    /**
+     * Streams frames directly from MediaMetadataRetriever into the animated GIF output file
+     * one bitmap at a time, eliminating multi-frame Bitmap heap buffering (PERF-006).
+     */
     private fun extractAndEncodeGif(
         inputFile: File,
         outputFile: File,
         durationMs: Long,
         cancellationToken: AtomicBoolean?,
         onProgress: ((progress: Float, etaRemainingMs: Long) -> Unit)?
-    ) {
+    ): Pair<Int, Int> {
         val retriever = MediaMetadataRetriever()
+        var completed = false
         try {
             retriever.setDataSource(inputFile.absolutePath)
-            val totalDuration = if (durationMs > 0) durationMs.coerceAtMost(10_000L) else 5_000L
-            val frameRate = 10 // 10 fps
-            val frameCount = ((totalDuration / 1000f) * frameRate).toInt().coerceIn(5, 60)
+            val totalDuration = if (durationMs > 0) durationMs.coerceAtMost(GIF_MAX_DURATION_MS) else GIF_DEFAULT_DURATION_MS
+            val frameRate = GIF_FRAME_RATE
+            val frameCount = ((totalDuration / 1000f) * frameRate).toInt().coerceIn(GIF_MIN_FRAMES, GIF_MAX_FRAMES)
             val intervalUs = (totalDuration * 1000L) / frameCount
+            val delayUnits = ((1000 / frameRate) / 10).coerceAtLeast(2)
 
-            val frames = mutableListOf<Bitmap>()
-            for (i in 0 until frameCount) {
-                if (cancellationToken?.get() == true) throw InterruptedException("GIF export cancelled")
-                val timeUs = i * intervalUs
-                val rawFrame = retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                if (rawFrame != null) {
-                    val targetW = 360
-                    val targetH = (360f * (rawFrame.height.toFloat() / rawFrame.width)).toInt()
-                    val scaled = Bitmap.createScaledBitmap(rawFrame, targetW, targetH, true)
-                    frames.add(scaled)
-                    if (scaled != rawFrame) rawFrame.recycle()
+            var gifWidth = 0
+            var gifHeight = 0
+            var headerWritten = false
+            var pixels: IntArray? = null
+            var indexedPixels: ByteArray? = null
+
+            BufferedOutputStream(FileOutputStream(outputFile)).use { out ->
+                for (i in 0 until frameCount) {
+                    if (cancellationToken?.get() == true) {
+                        throw InterruptedException("GIF export cancelled")
+                    }
+                    val timeUs = i * intervalUs
+                    val rawFrame = retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    if (rawFrame != null) {
+                        val targetW = if (gifWidth > 0) gifWidth else GIF_TARGET_WIDTH_PX
+                        val srcW = rawFrame.width.coerceAtLeast(1)
+                        val targetH = if (gifHeight > 0) gifHeight else (GIF_TARGET_WIDTH_PX.toFloat() * (rawFrame.height.toFloat() / srcW)).toInt().coerceAtLeast(1)
+                        val scaled = Bitmap.createScaledBitmap(rawFrame, targetW, targetH, true)
+                        if (scaled != rawFrame) rawFrame.recycle()
+
+                        try {
+                            if (!headerWritten) {
+                                gifWidth = scaled.width
+                                gifHeight = scaled.height
+                                writeGifHeaderAndPalette(out, gifWidth, gifHeight)
+                                pixels = IntArray(gifWidth * gifHeight)
+                                indexedPixels = ByteArray(gifWidth * gifHeight)
+                                headerWritten = true
+                            }
+                            writeGifFrame(
+                                frame = scaled,
+                                width = gifWidth,
+                                height = gifHeight,
+                                delayUnits = delayUnits,
+                                pixels = pixels!!,
+                                indexedPixels = indexedPixels!!,
+                                out = out
+                            )
+                        } finally {
+                            scaled.recycle()
+                        }
+                    }
+                    onProgress?.invoke(0.1f + (0.85f * (i + 1) / frameCount), 0L)
                 }
-                onProgress?.invoke(0.1f + (0.4f * (i + 1) / frameCount), 0L)
+
+                if (!headerWritten) {
+                    throw IllegalStateException("Failed to extract video frames for GIF")
+                }
+
+                out.write(0x3B) // Trailer
+                out.flush()
             }
 
-            if (frames.isEmpty()) {
-                throw IllegalStateException("Failed to extract video frames for GIF")
-            }
-
-            // Write animated GIF using basic GIF stream encoder
-            FileOutputStream(outputFile).use { out ->
-                encodeGifStream(frames, out, delayMs = (1000 / frameRate), cancellationToken, onProgress)
-            }
-            frames.forEach { it.recycle() }
+            completed = true
+            onProgress?.invoke(1.0f, 0L)
+            return Pair(gifWidth, gifHeight)
         } finally {
             try { retriever.release() } catch (_: Exception) {}
+            if (!completed) {
+                outputFile.delete()
+            }
         }
     }
 
-    /**
-     * Pure Kotlin lightweight Animated GIF writer with 256-color palette.
-     */
-    private fun encodeGifStream(
-        frames: List<Bitmap>,
-        out: OutputStream,
-        delayMs: Int,
-        cancellationToken: AtomicBoolean?,
-        onProgress: ((progress: Float, etaRemainingMs: Long) -> Unit)?
-    ) {
-        val width = frames[0].width
-        val height = frames[0].height
-
+    private fun writeGifHeaderAndPalette(out: OutputStream, width: Int, height: Int) {
         // Header
         out.write("GIF89a".toByteArray())
 
@@ -387,51 +465,47 @@ object VideoProcessor {
             '2'.code.toByte(), '.'.code.toByte(), '0'.code.toByte(),
             0x03, 0x01, 0x00, 0x00, 0x00
         ))
+    }
 
-        // Write each frame
-        for ((idx, frame) in frames.withIndex()) {
-            if (cancellationToken?.get() == true) throw InterruptedException("GIF export cancelled")
+    private fun writeGifFrame(
+        frame: Bitmap,
+        width: Int,
+        height: Int,
+        delayUnits: Int,
+        pixels: IntArray,
+        indexedPixels: ByteArray,
+        out: OutputStream
+    ) {
+        // Graphic Control Extension (frame delay in 1/100s)
+        out.write(byteArrayOf(
+            0x21, 0xF9.toByte(), 0x04, 0x00,
+            (delayUnits and 0xFF).toByte(), ((delayUnits shr 8) and 0xFF).toByte(),
+            0x00, 0x00
+        ))
 
-            // Graphic Control Extension (frame delay in 1/100s)
-            val delayUnits = (delayMs / 10).coerceAtLeast(2)
-            out.write(byteArrayOf(
-                0x21, 0xF9.toByte(), 0x04, 0x00,
-                (delayUnits and 0xFF).toByte(), ((delayUnits shr 8) and 0xFF).toByte(),
-                0x00, 0x00
-            ))
+        // Image Descriptor
+        out.write(byteArrayOf(
+            0x2C, 0x00, 0x00, 0x00, 0x00,
+            (width and 0xFF).toByte(), ((width shr 8) and 0xFF).toByte(),
+            (height and 0xFF).toByte(), ((height shr 8) and 0xFF).toByte(),
+            0x00
+        ))
 
-            // Image Descriptor
-            out.write(byteArrayOf(
-                0x2C, 0x00, 0x00, 0x00, 0x00,
-                (width and 0xFF).toByte(), ((width shr 8) and 0xFF).toByte(),
-                (height and 0xFF).toByte(), ((height shr 8) and 0xFF).toByte(),
-                0x00
-            ))
-
-            // Quantize pixels to palette indices
-            val pixels = IntArray(width * height)
-            frame.getPixels(pixels, 0, width, 0, 0, width, height)
-            val indexedPixels = ByteArray(pixels.size)
-            for (i in pixels.indices) {
-                val color = pixels[i]
-                val r = (color shr 16) and 0xFF
-                val g = (color shr 8) and 0xFF
-                val b = color and 0xFF
-                // Map to 6x7x6 cube
-                val rI = (r * 5) / 255
-                val gI = (g * 6) / 255
-                val bI = (b * 5) / 255
-                indexedPixels[i] = (rI * 42 + gI * 6 + bI).toByte()
-            }
-
-            // Write simple uncompressed LZW raster data
-            writeUncompressedLzw(indexedPixels, out)
-
-            onProgress?.invoke(0.5f + (0.5f * (idx + 1) / frames.size), 0L)
+        // Quantize pixels to palette indices
+        frame.getPixels(pixels, 0, width, 0, 0, width, height)
+        for (i in pixels.indices) {
+            val color = pixels[i]
+            val r = (color shr 16) and 0xFF
+            val g = (color shr 8) and 0xFF
+            val b = color and 0xFF
+            val rI = (r * 5) / 255
+            val gI = (g * 6) / 255
+            val bI = (b * 5) / 255
+            indexedPixels[i] = (rI * 42 + gI * 6 + bI).toByte()
         }
 
-        // Trailer
-        out.write(0x3B)
+        // Write uncompressed LZW raster data
+        writeUncompressedLzw(indexedPixels, out)
     }
 
     private fun writeUncompressedLzw(pixels: ByteArray, out: OutputStream) {
@@ -441,7 +515,6 @@ object VideoProcessor {
         val endCode = clearCode + 1
 
         val buffer = ByteArrayOutputStream()
-        // Write Clear code
         var curByte = 0
         var curBits = 0
 
@@ -455,25 +528,46 @@ object VideoProcessor {
             }
         }
 
+        fun flushBlock() {
+            if (buffer.size() > 0) {
+                val block = buffer.toByteArray()
+                var offset = 0
+                while (offset < block.size) {
+                    val chunkLen = minOf(255, block.size - offset)
+                    out.write(chunkLen)
+                    out.write(block, offset, chunkLen)
+                    offset += chunkLen
+                }
+                buffer.reset()
+            }
+        }
+
         putBits(clearCode, minCodeSize + 1)
+        var codesSinceClear = 0
         for (b in pixels) {
             putBits(b.toInt() and 0xFF, minCodeSize + 1)
-            if (buffer.size() >= 254) {
-                val block = buffer.toByteArray()
-                out.write(block.size)
-                out.write(block)
-                buffer.reset()
+            codesSinceClear++
+
+            // The GIF LZW decoder grows its dictionary as it reads codes and increases the
+            // code width once the dictionary reaches 2^codeSize entries. Because this writer
+            // emits every pixel as a literal code (never adding dictionary entries), we must
+            // periodically emit a Clear code to reset the decoder's dictionary and keep the
+            // code width fixed at minCodeSize + 1 bits. Without this, the decoder would
+            // desynchronize after ~254 codes and the frame would be decoded incorrectly.
+            if (codesSinceClear >= 254) {
+                putBits(clearCode, minCodeSize + 1)
+                codesSinceClear = 0
+            }
+
+            if (buffer.size() >= 250) {
+                flushBlock()
             }
         }
         putBits(endCode, minCodeSize + 1)
         if (curBits > 0) {
             buffer.write(curByte and 0xFF)
         }
-        if (buffer.size() > 0) {
-            val block = buffer.toByteArray()
-            out.write(block.size)
-            out.write(block)
-        }
+        flushBlock()
         out.write(0x00) // Block terminator
     }
 }

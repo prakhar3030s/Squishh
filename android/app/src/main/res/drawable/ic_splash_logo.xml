@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- High-contrast Sage squircle centered within Android 12+ circular splash safe area -->
+    <path
+        android:fillColor="#4A6B53"
+        android:pathData="M34,24 L74,24 Q84,24 84,34 L84,74 Q84,84 74,84 L34,84 Q24,84 24,74 L24,34 Q24,24 34,24 Z" />
+    <!-- Subtle top-left rim highlight for contrast against #141618 -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M34,24.75 L74,24.75 Q83.25,24.75 83.25,34 L83.25,74 Q83.25,83.25 74,83.25 L34,83.25 Q24.75,83.25 24.75,74 L24.75,34 Q24.75,24.75 34,24.75 Z"
+        android:strokeColor="#76A183"
+        android:strokeWidth="1.5" />
+    <!-- Sparkle star motif -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,34 C54,40.2 58.2,44.4 64.4,44.4 C58.2,44.4 54,48.6 54,54.8 C54,48.6 49.8,44.4 43.6,44.4 C49.8,44.4 54,40.2 54,34 Z" />
+    <!-- Primary compression wave -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M37,63 C41.5,57.5 49.5,57.5 54,63 C58.5,68.5 66.5,68.5 71,63"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="3.6" />
+    <!-- Secondary compression wave -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M42,70.5 C45,67 50,67 53,70.5 C56,74 61,74 64,70.5"
+        android:strokeColor="#EDE9E3"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="2.6" />
+</vector>
